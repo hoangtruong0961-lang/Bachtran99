@@ -1,7 +1,7 @@
 import { RegionROI } from '../types';
 import { applyBackgroundFilter } from './localPaddleOcrEngine';
 import { detectTextPresenceInFrame, applyUnsharpMask, computeFrameDiffScore, computeLaplacianVariance, shouldOverrideFrameSkip, applyThresholdingNoiseFilter } from './ocrPreprocessing';
-import * as MP4BoxModule from 'mp4box';
+import { createFile as createMp4BoxFile, DataStream } from 'mp4box';
 
 /**
  * Adaptive threshold for detecting subtitle text transitions.
@@ -57,8 +57,7 @@ function getVideoCurrentTime(el: HTMLVideoElement): number {
 }
 
 function createMp4File() {
-  const mp4box = (MP4BoxModule as any).createFile ? (MP4BoxModule as any) : (MP4BoxModule as any).default;
-  return mp4box.createFile();
+  return createMp4BoxFile();
 }
 
 /**
@@ -159,7 +158,7 @@ export async function extractFramesTrueWebCodecs(options: FrameExtractorOptions)
             const entry = trak.mdia.minf.stbl.stsd.entries[0];
             const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C;
             if (box) {
-              const stream = new (MP4BoxModule as any).DataStream(undefined, 0, (MP4BoxModule as any).DataStream.BIG_ENDIAN);
+              const stream = new DataStream(undefined, 0, DataStream.BIG_ENDIAN);
               box.write(stream);
               description = new Uint8Array(stream.buffer, 8);
             }

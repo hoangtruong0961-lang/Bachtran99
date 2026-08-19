@@ -1,12 +1,11 @@
 import { SubtitleItem, SubtitleStyleConfig, BlurOverlay, LogoOverlay, TextOverlay } from '../types';
 import { wrapSubtitleText } from './srtParser';
 import { generateVoiceoverAudioBuffer } from './audioExporter';
-import * as MP4BoxModule from 'mp4box';
+import { createFile as createMp4BoxFile, DataStream } from 'mp4box';
 import fixWebmDuration from 'fix-webm-duration';
 
 function createMp4File() {
-  const mp4box = (MP4BoxModule as any).createFile ? (MP4BoxModule as any) : (MP4BoxModule as any).default;
-  return mp4box.createFile();
+  return createMp4BoxFile();
 }
 
 /**
@@ -818,7 +817,7 @@ export async function renderWithMp4Muxer(
             const entry = trak.mdia.minf.stbl.stsd.entries[0];
             const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C;
             if (box) {
-              const stream = new (MP4BoxModule as any).DataStream(undefined, 0, (MP4BoxModule as any).DataStream.BIG_ENDIAN);
+              const stream = new DataStream(undefined, 0, DataStream.BIG_ENDIAN);
               box.write(stream);
               description = new Uint8Array(stream.buffer, 8);
             }

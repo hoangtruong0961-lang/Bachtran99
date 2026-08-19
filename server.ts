@@ -77,10 +77,10 @@ function isValidPublicHttpUrl(urlString: string): boolean {
 
 dotenv.config();
 
-const currentFilename = typeof __filename !== 'undefined' ? __filename : fileURLToPath(import.meta.url);
+const currentFilename = typeof __filename !== 'undefined' ? __filename : (process.argv[1] || path.join(process.cwd(), 'server.ts'));
 const currentDirname = typeof __dirname !== 'undefined' ? __dirname : path.dirname(currentFilename);
 
-const customRequire = typeof require !== 'undefined' ? require : createRequire(import.meta.url);
+const customRequire = typeof require !== 'undefined' ? require : createRequire(currentFilename);
 let sherpaOnnxModule: any = null;
 try {
   sherpaOnnxModule = customRequire('sherpa-onnx');

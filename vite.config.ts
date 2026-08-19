@@ -18,7 +18,25 @@ export default defineConfig(() => {
       format: 'es' as const,
     },
     build: {
-      chunkSizeWarningLimit: 2500,
+      chunkSizeWarningLimit: 30000,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes('opencv.js') || id.includes('@techstark/opencv-js')) {
+              return 'opencv';
+            }
+            if (id.includes('onnxruntime-web')) {
+              return 'onnxruntime';
+            }
+            if (id.includes('node_modules/lucide-react')) {
+              return 'icons';
+            }
+            if (id.includes('node_modules/react') || id.includes('node_modules/react-dom') || id.includes('node_modules/scheduler')) {
+              return 'react-vendor';
+            }
+          },
+        },
+      },
     },
     server: {
       headers: {
