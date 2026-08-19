@@ -484,13 +484,27 @@ export async function storeModelBufferDB(key: string, buffer: ArrayBuffer, name?
 }
 
 /**
- * Validate that an ArrayBuffer is a legitimate ONNX model (starts with protobuf message tag 0x08)
+ * Validate that an ArrayBuffer is a legitimate ONNX model (starts with protobuf message tag 0x08 or ORT format 0x14)
  */
 export function isValidOnnxBuffer(buffer: ArrayBuffer | null | undefined): boolean {
   if (!buffer || buffer.byteLength < 100000) return false;
-  const uint8 = new Uint8Array(buffer, 0, Math.min(16, buffer.byteLength));
-  // An ONNX model protobuf file must start with tag 0x08 (field 1 ir_version)
-  return uint8[0] === 0x08;
+  const uint8 = new Uint8Array(buffer, 0, Math.min(64, buffer.byteLength));
+  const isProtobuf = uint8[0] === 0x08;
+  const isOrtFormat = uint8[0] === 0x14 || (uint8[4] === 0x4f && uint8[5] === 0x52 && uint8[6] === 0x54 && uint8[7] === 0x4d);
+  if (!isProtobuf && !isOrtFormat) return false;
+
+  const headStr = new TextDecoder('utf-8').decode(uint8.subarray(0, 64)).toLowerCase();
+  if (
+    headStr.includes('<html') ||
+    headStr.includes('<!doc') ||
+    headStr.includes('{"') ||
+    headStr.includes('error') ||
+    headStr.includes('git-lfs') ||
+    headStr.includes('version https://')
+  ) {
+    return false;
+  }
+  return true;
 }
 
 /**

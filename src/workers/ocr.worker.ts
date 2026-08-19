@@ -212,9 +212,6 @@ self.onmessage = async (e: MessageEvent) => {
         }
 
         const providers: string[] = ['wasm'];
-        if (hasWebGpu) {
-          providers.unshift('webgpu');
-        }
 
         ocrService = new PaddleOcrService({
           model: {

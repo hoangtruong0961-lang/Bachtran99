@@ -708,8 +708,7 @@ export async function runClientSideLocalOcrBatch(
           throw new Error('Không thể tải tệp trọng số ONNX hợp lệ cho PaddleOCR Main Thread.');
         }
 
-        const hasWebGpu = typeof navigator !== 'undefined' && 'gpu' in navigator;
-        const mainProviders = hasWebGpu ? ['webgpu', 'wasm'] : ['wasm'];
+        const mainProviders = ['wasm'];
 
         mainThreadPaddleService = new PaddleOcrService({
           model: {
