@@ -264,7 +264,7 @@ export async function extractFramesTrueWebCodecs(options: FrameExtractorOptions)
             const fallbackCanvas = typeof OffscreenCanvas !== 'undefined'
               ? new OffscreenCanvas(320, 160)
               : document.createElement('canvas');
-            const fallbackCtx = fallbackCanvas.getContext('2d') as any;
+            const fallbackCtx = fallbackCanvas.getContext('2d', { willReadFrequently: true }) as any;
 
             const pass1Decoder = new VideoDecoder({
               output: async (frame: VideoFrame) => {
@@ -408,12 +408,12 @@ export async function extractFramesTrueWebCodecs(options: FrameExtractorOptions)
             const fallbackCanvas = typeof OffscreenCanvas !== 'undefined'
               ? new OffscreenCanvas(320, 160)
               : document.createElement('canvas');
-            const fallbackCtx = fallbackCanvas.getContext('2d') as any;
+            const fallbackCtx = fallbackCanvas.getContext('2d', { willReadFrequently: true }) as any;
 
             const offscreenCanvas = typeof OffscreenCanvas !== 'undefined'
               ? new OffscreenCanvas(1280, 720)
               : document.createElement('canvas');
-            const offCtx = offscreenCanvas.getContext('2d') as any;
+            const offCtx = offscreenCanvas.getContext('2d', { willReadFrequently: true }) as any;
 
             const pass2Decoder = new VideoDecoder({
               output: async (frame: VideoFrame) => {
@@ -551,7 +551,7 @@ export async function extractFramesTrueWebCodecs(options: FrameExtractorOptions)
                   finalCanvas = document.createElement('canvas');
                   finalCanvas.width = targetW;
                   finalCanvas.height = targetH;
-                  const fCtx = finalCanvas.getContext('2d');
+                  const fCtx = finalCanvas.getContext('2d', { willReadFrequently: true });
                   if (fCtx) {
                     fCtx.putImageData(imgData, 0, 0);
                   }

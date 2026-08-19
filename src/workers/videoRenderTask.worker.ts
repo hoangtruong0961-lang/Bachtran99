@@ -435,7 +435,7 @@ async function processRenderTask(data: any) {
 
     if (!offscreenCanvas || offscreenCanvas.width !== alignedWidth || offscreenCanvas.height !== alignedHeight) {
       offscreenCanvas = new OffscreenCanvas(alignedWidth, alignedHeight);
-      ctx = offscreenCanvas.getContext('2d');
+      ctx = offscreenCanvas.getContext('2d', { willReadFrequently: true });
     }
 
     if (!ctx || !offscreenCanvas) {

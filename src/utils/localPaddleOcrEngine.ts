@@ -769,7 +769,7 @@ export async function runClientSideLocalOcrBatch(
             const canvas = document.createElement('canvas');
             canvas.width = f.width;
             canvas.height = f.height;
-            const ctx = canvas.getContext('2d');
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
             if (ctx) {
               const imgData = new ImageData(new Uint8ClampedArray(f.pixelData), f.width, f.height);
               ctx.putImageData(imgData, 0, 0);

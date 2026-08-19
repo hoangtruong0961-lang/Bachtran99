@@ -412,7 +412,7 @@ async function processMessage(e: MessageEvent) {
       alignedHeight = Math.max(2, Math.floor(vHeight / 2) * 2);
 
       offscreenCanvas = new OffscreenCanvas(alignedWidth, alignedHeight);
-      ctx = offscreenCanvas.getContext('2d');
+      ctx = offscreenCanvas.getContext('2d', { willReadFrequently: true });
 
       if (!ctx) {
         throw new Error('OffscreenCanvas 2D context creation failed');

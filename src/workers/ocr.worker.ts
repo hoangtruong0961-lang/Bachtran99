@@ -1,5 +1,15 @@
 // Web Worker Environment Polyfill for ppu-paddle-ocr and ppu-ocv
 if (typeof self !== 'undefined') {
+  if (typeof OffscreenCanvas !== 'undefined' && OffscreenCanvas.prototype.getContext) {
+    const origGetCtx = OffscreenCanvas.prototype.getContext;
+    OffscreenCanvas.prototype.getContext = function (contextId: string, options?: any) {
+      if (contextId === '2d') {
+        options = { willReadFrequently: true, ...(options || {}) };
+      }
+      return origGetCtx.call(this, contextId as any, options);
+    } as any;
+  }
+
   if (typeof (self as any).document === 'undefined') {
     (self as any).document = {
       createElement: (tag: string) => {
@@ -242,7 +252,10 @@ self.onmessage = async (e: MessageEvent) => {
           } as any,
           session: {
             executionProviders: providers,
-          },
+            logSeverityLevel: 3,
+            logVerbosityLevel: 0,
+            graphOptimizationLevel: 'all',
+          } as any,
           processing: {
             engine: 'canvas-native',
           },
@@ -313,7 +326,10 @@ self.onmessage = async (e: MessageEvent) => {
             },
             session: {
               executionProviders: ['wasm'],
-            },
+              logSeverityLevel: 3,
+              logVerbosityLevel: 0,
+              graphOptimizationLevel: 'all',
+            } as any,
             processing: {
               engine: 'canvas-native',
             },
@@ -386,7 +402,7 @@ self.onmessage = async (e: MessageEvent) => {
 
               if (typeof OffscreenCanvas !== 'undefined') {
                 usedOffscreen = new OffscreenCanvas(item.width, item.height);
-                usedCtx = usedOffscreen.getContext('2d') as any;
+                usedCtx = usedOffscreen.getContext('2d', { willReadFrequently: true }) as any;
                 if (usedCtx) {
                   const imgData = new ImageData(typedArray, item.width, item.height);
                   usedCtx.putImageData(imgData, 0, 0);
