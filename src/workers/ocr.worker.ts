@@ -377,7 +377,8 @@ async function handleWorkerIncomingMessage(e: MessageEvent) {
       const results: { timestamp: number; text: string; confidence?: number; deepScan?: boolean }[] = [];
       let skippedFramesCount = 0;
       const { sourceLang, targetLang, enableDeepScan = true } = e.data;
-      const isLatin = isLatinLanguage(sourceLang) || isLatinLanguage(targetLang);
+      // CRITICAL: isLatin MUST be evaluated strictly against the video's SOURCE language being recognized in the frames!
+      const isLatin = isLatinLanguage(sourceLang);
 
       self.postMessage({
         type: 'PROGRESS',
@@ -405,7 +406,6 @@ async function handleWorkerIncomingMessage(e: MessageEvent) {
                 continue;
               }
 
-              // Apply simulated JPEG "black background filtering" (Thresholding Noise Filter) on raw pixel byte array
               let typedArray: Uint8ClampedArray;
               if (item.pixelData instanceof Uint8ClampedArray) {
                 typedArray = item.pixelData;
@@ -416,8 +416,6 @@ async function handleWorkerIncomingMessage(e: MessageEvent) {
               } else {
                 typedArray = new Uint8ClampedArray(item.pixelData);
               }
-
-              applyThresholdingNoiseFilter(typedArray, item.width, item.height);
 
               if (typeof OffscreenCanvas !== 'undefined') {
                 if (!usedOffscreen || usedOffscreen.width !== item.width || usedOffscreen.height !== item.height) {
