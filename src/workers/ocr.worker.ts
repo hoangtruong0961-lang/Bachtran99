@@ -142,7 +142,27 @@ async function fetchResourceBuffer(candidates: string[], isDict: boolean = false
   return null;
 }
 
-self.onmessage = async (e: MessageEvent) => {
+let isWorkerBusyHandling = false;
+const workerIncomingQueue: MessageEvent[] = [];
+
+self.onmessage = (e: MessageEvent) => {
+  workerIncomingQueue.push(e);
+  drainWorkerMessageQueue();
+};
+
+async function drainWorkerMessageQueue() {
+  if (isWorkerBusyHandling || workerIncomingQueue.length === 0) return;
+  isWorkerBusyHandling = true;
+  const e = workerIncomingQueue.shift()!;
+  try {
+    await handleWorkerIncomingMessage(e);
+  } finally {
+    isWorkerBusyHandling = false;
+    drainWorkerMessageQueue();
+  }
+}
+
+async function handleWorkerIncomingMessage(e: MessageEvent) {
   const { type, detBuffer: incomingDet, recBuffer: incomingRec, dictBuffer: incomingDict, frames, workerId } = e.data;
   const currentWorkerId = typeof workerId === 'number' ? workerId : 1;
 
@@ -369,18 +389,20 @@ self.onmessage = async (e: MessageEvent) => {
       });
 
       if (ocrService) {
-        // True concurrent batch processing: run all recognitions in parallel to utilize multithreading/GPU hardware optimally
-        const promises = frames.map(async (item) => {
-          if (!ocrService) return null;
+        let usedOffscreen: OffscreenCanvas | null = null;
+        let usedCtx: OffscreenCanvasRenderingContext2D | null = null;
+
+        for (let i = 0; i < frames.length; i++) {
+          const item = frames[i];
+          if (!ocrService) break;
+
           try {
             let res: any = null;
-            let usedOffscreen: OffscreenCanvas | null = null;
-            let usedCtx: OffscreenCanvasRenderingContext2D | null = null;
 
             // High-Performance Path: Prioritize zero-copy transferred pixelData with OffscreenCanvas
             if (item.pixelData && item.width && item.height && item.width > 0 && item.height > 0) {
               if (item.pixelData.byteLength === 0 || (item.pixelData.buffer && item.pixelData.buffer.byteLength === 0)) {
-                return null;
+                continue;
               }
 
               // Apply simulated JPEG "black background filtering" (Thresholding Noise Filter) on raw pixel byte array
@@ -398,9 +420,11 @@ self.onmessage = async (e: MessageEvent) => {
               applyThresholdingNoiseFilter(typedArray, item.width, item.height);
 
               if (typeof OffscreenCanvas !== 'undefined') {
-                usedOffscreen = new OffscreenCanvas(item.width, item.height);
-                usedCtx = usedOffscreen.getContext('2d', { willReadFrequently: true }) as any;
-                if (usedCtx) {
+                if (!usedOffscreen || usedOffscreen.width !== item.width || usedOffscreen.height !== item.height) {
+                  usedOffscreen = new OffscreenCanvas(item.width, item.height);
+                  usedCtx = usedOffscreen.getContext('2d', { willReadFrequently: true }) as any;
+                }
+                if (usedCtx && usedOffscreen) {
                   const imgData = new ImageData(typedArray, item.width, item.height);
                   usedCtx.putImageData(imgData, 0, 0);
                   // Tier 1 Fast Pass
@@ -447,18 +471,10 @@ self.onmessage = async (e: MessageEvent) => {
 
             const candidateMinConf = 0.25;
             if (text && confidence >= candidateMinConf && applyHardFilter(text, confidence, candidateMinConf, !isLatin) && applySingleCjkFilter(text, !isLatin)) {
-              return { timestamp: item.timestamp, text, confidence };
+              results.push({ timestamp: item.timestamp, text, confidence });
             }
           } catch (recErr) {
             console.warn(`[OCR Worker #${currentWorkerId}] Frame recognition exception for timestamp ${item.timestamp}:`, recErr);
-          }
-          return null;
-        });
-
-        const batchResults = await Promise.all(promises);
-        for (const item of batchResults) {
-          if (item) {
-            results.push(item);
           }
         }
       }

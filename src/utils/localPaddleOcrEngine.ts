@@ -1158,24 +1158,20 @@ export class StreamingOcrPool {
       return;
     }
 
-    // Depth-2 In-Flight Queueing: dispatch work to any worker that has < 2 in-flight batches queued
+    // Dispatch work to any worker that has 0 in-flight batches active
     while (this.frameQueue.length > 0) {
-      const availableWorkers = this.workers.filter((w) => w.inFlightCount < 2);
+      const availableWorkers = this.workers.filter((w) => w.inFlightCount === 0);
       if (availableWorkers.length === 0) break;
 
-      // Pick the worker with the lowest in-flight queue depth
-      availableWorkers.sort((a, b) => a.inFlightCount - b.inFlightCount);
+      // Pick the available worker
       const worker = availableWorkers[0];
 
-      const batchSize = Math.min(4, this.frameQueue.length);
+      const batchSize = Math.min(6, this.frameQueue.length);
       const batch = this.frameQueue.splice(0, batchSize);
 
-      worker.inFlightCount++;
+      worker.inFlightCount = 1;
       worker.isBusy = true;
-      if (!worker.currentBatchTimestamps) {
-        worker.currentBatchTimestamps = [];
-      }
-      worker.currentBatchTimestamps.push(...batch.map((f) => f.timestamp));
+      worker.currentBatchTimestamps = batch.map((f) => f.timestamp);
       this.totalProcessed += batch.length;
 
       this.reportProgress();
