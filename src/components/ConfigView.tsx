@@ -84,8 +84,12 @@ export const ConfigView: React.FC<ConfigViewProps> = ({
     setPaddleDownloadMsg(null);
     setPaddleProgress({ percent: 0, msg: 'Đang chuẩn bị nạp mô hình...' });
 
+    let downloadErrorMsg = '';
     const success = await downloadPaddleOcrModels((pct, msg) => {
       setPaddleProgress({ percent: pct, msg });
+      if (pct === 0 && (msg.startsWith('Lỗi') || msg.toLowerCase().includes('lỗi'))) {
+        downloadErrorMsg = msg;
+      }
     });
 
     setIsDownloadingPaddle(false);
@@ -95,7 +99,7 @@ export const ConfigView: React.FC<ConfigViewProps> = ({
       setPaddleDownloadMsg({ text: 'Tải và lưu Model PaddleOCR v6 Tiny thành công vào IndexedDB!', isError: false });
     } else {
       setPaddleDownloadMsg({
-        text: 'Không thể tải Model từ CDN. Bạn hãy kiểm tra lại kết nối mạng hoặc thử lại.',
+        text: downloadErrorMsg || 'Không thể tải Model từ CDN. Bạn hãy kiểm tra lại kết nối mạng hoặc thử lại.',
         isError: true,
       });
     }

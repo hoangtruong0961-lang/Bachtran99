@@ -47,13 +47,19 @@ const DICT_MODEL_URL = '/api/paddle-models/dict';
 export function isProtobufValidHeader(buf: ArrayBuffer | null | undefined): boolean {
   if (!buf || buf.byteLength < 200000) return false;
   const u8 = new Uint8Array(buf, 0, Math.min(128, buf.byteLength));
-  // Reject HTML / JSON error responses
-  const headStr = new TextDecoder('utf-8').decode(u8.subarray(0, 32)).toLowerCase();
-  if (headStr.includes('<html') || headStr.includes('<!doc') || headStr.includes('{"') || headStr.includes('error')) {
+  // Reject HTML / JSON / Git-LFS text error responses
+  const headStr = new TextDecoder('utf-8').decode(u8.subarray(0, 64)).toLowerCase();
+  if (
+    headStr.includes('<html') ||
+    headStr.includes('<!doc') ||
+    headStr.includes('{"') ||
+    headStr.includes('error') ||
+    headStr.includes('git-lfs') ||
+    headStr.includes('version https://')
+  ) {
     return false;
   }
-  // Protobuf ONNX starts with 0x08 (field 1: ir_version varint tag) or ORT format (0x00, "ORT", etc.)
-  return u8[0] === 0x08 || u8[0] === 0x00 || (u8[0] === 0x4f && u8[1] === 0x52 && u8[2] === 0x54);
+  return true;
 }
 
 /**
