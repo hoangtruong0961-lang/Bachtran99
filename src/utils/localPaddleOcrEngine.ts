@@ -42,21 +42,18 @@ const REC_MODEL_URL = '/api/paddle-models/rec';
 const DICT_MODEL_URL = '/api/paddle-models/dict';
 
 /**
- * Validate that an ArrayBuffer contains a valid ONNX Protobuf binary header
- * (Starts with 0x08 and does not contain UTF-8 replacement char byte sequence 0xEF 0xBF 0xBD)
+ * Validate that an ArrayBuffer contains a valid ONNX/ORT binary model
  */
 export function isProtobufValidHeader(buf: ArrayBuffer | null | undefined): boolean {
-  if (!buf || buf.byteLength < 100000) return false;
-  const u8 = new Uint8Array(buf, 0, Math.min(64, buf.byteLength));
-  // Protobuf ONNX starts with 0x08 (field 1: ir_version varint tag)
-  if (u8[0] !== 0x08) return false;
-  // If corrupted with UTF-8 replacement chars, it has 0xef 0xbf 0xbd sequence
-  for (let i = 0; i < u8.length - 2; i++) {
-    if (u8[i] === 0xef && u8[i + 1] === 0xbf && u8[i + 2] === 0xbd) {
-      return false;
-    }
+  if (!buf || buf.byteLength < 200000) return false;
+  const u8 = new Uint8Array(buf, 0, Math.min(128, buf.byteLength));
+  // Reject HTML / JSON error responses
+  const headStr = new TextDecoder('utf-8').decode(u8.subarray(0, 32)).toLowerCase();
+  if (headStr.includes('<html') || headStr.includes('<!doc') || headStr.includes('{"') || headStr.includes('error')) {
+    return false;
   }
-  return true;
+  // Protobuf ONNX starts with 0x08 (field 1: ir_version varint tag) or ORT format (0x00, "ORT", etc.)
+  return u8[0] === 0x08 || u8[0] === 0x00 || (u8[0] === 0x4f && u8[1] === 0x52 && u8[2] === 0x54);
 }
 
 /**
@@ -84,11 +81,13 @@ export function sanitizeDictionaryBuffer(buffer: ArrayBuffer | string): ArrayBuf
 
 export async function fetchDictionaryFromCandidates(): Promise<ArrayBuffer | null> {
   const dictCandidates = [
+    '/api/paddle-models/dict',
+    '/api/ocr/model/dict',
     '/models/ppocrv6_tiny_dict.txt',
     '/ppocrv6_tiny_dict.txt',
     DICT_MODEL_URL,
-    '/api/paddle-models/dict',
     'https://raw.githubusercontent.com/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/recognition/ppocrv6_tiny_dict.txt',
+    'https://cdn.jsdelivr.net/gh/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models@main/recognition/ppocrv6_tiny_dict.txt',
     '/models/ppocrv5_keys.txt',
     '/ppocrv5_keys.txt',
   ];
@@ -215,11 +214,20 @@ export async function downloadPaddleOcrModels(
     const fetchWithProgress = async (proxyUrl: string, name: string, startPct: number, endPct: number) => {
       const isDet = name.toLowerCase().includes('detection') || proxyUrl.includes('det');
       const fallbackUrls = [
+        isDet ? '/api/paddle-models/det' : '/api/paddle-models/rec',
+        isDet ? '/api/ocr/model/det' : '/api/ocr/model/rec',
         isDet ? '/models/PaddleOCRv6-tiny-det.onnx' : '/models/PaddleOCRv6-tiny-rec.onnx',
         isDet ? '/PaddleOCRv6-tiny-det.onnx' : '/PaddleOCRv6-tiny-rec.onnx',
         proxyUrl,
-        isDet ? '/api/paddle-models/det' : '/api/paddle-models/rec',
-        isDet ? '/api/ocr/model/det' : '/api/ocr/model/rec',
+        isDet
+          ? 'https://media.githubusercontent.com/media/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/detection/ort/PP-OCRv6_tiny_det.ort'
+          : 'https://media.githubusercontent.com/media/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/recognition/ort/PP-OCRv6_tiny_rec.ort',
+        isDet
+          ? 'https://raw.githubusercontent.com/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/detection/ort/PP-OCRv6_tiny_det.ort'
+          : 'https://raw.githubusercontent.com/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/recognition/ort/PP-OCRv6_tiny_rec.ort',
+        isDet
+          ? 'https://cdn.jsdelivr.net/gh/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models@main/detection/ort/PP-OCRv6_tiny_det.ort'
+          : 'https://cdn.jsdelivr.net/gh/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models@main/recognition/ort/PP-OCRv6_tiny_rec.ort',
       ];
 
       let lastError: any = null;
@@ -296,9 +304,13 @@ export async function downloadPaddleOcrModels(
     if (onProgress) onProgress(85, 'Đang tải Từ điển ký tự PP-OCRv6 (ppocrv6_tiny_dict.txt)...');
     let dictBuffer: ArrayBuffer | null = null;
     const dictCandidates = [
+      '/api/paddle-models/dict',
+      '/api/ocr/model/dict',
       '/models/ppocrv6_tiny_dict.txt',
       '/ppocrv6_tiny_dict.txt',
       DICT_MODEL_URL,
+      'https://raw.githubusercontent.com/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/recognition/ppocrv6_tiny_dict.txt',
+      'https://cdn.jsdelivr.net/gh/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models@main/recognition/ppocrv6_tiny_dict.txt',
       '/models/ppocrv5_keys.txt',
       '/ppocrv5_keys.txt',
     ];

@@ -501,6 +501,101 @@ async function startServer() {
 
   app.use(express.json({ limit: '50mb' }));
 
+  // PaddleOCR PP-OCRv6 Tiny Models & Dictionary Serving Endpoints
+  const PADDLE_MODEL_CONFIGS: Record<string, { filename: string; remoteUrl: string; minSize: number; contentType: string }> = {
+    det: {
+      filename: 'PaddleOCRv6-tiny-det.onnx',
+      remoteUrl: 'https://media.githubusercontent.com/media/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/detection/ort/PP-OCRv6_tiny_det.ort',
+      minSize: 500000,
+      contentType: 'application/octet-stream',
+    },
+    rec: {
+      filename: 'PaddleOCRv6-tiny-rec.onnx',
+      remoteUrl: 'https://media.githubusercontent.com/media/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/recognition/ort/PP-OCRv6_tiny_rec.ort',
+      minSize: 1000000,
+      contentType: 'application/octet-stream',
+    },
+    dict: {
+      filename: 'ppocrv6_tiny_dict.txt',
+      remoteUrl: 'https://raw.githubusercontent.com/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/recognition/ppocrv6_tiny_dict.txt',
+      minSize: 1000,
+      contentType: 'text/plain; charset=utf-8',
+    },
+  };
+
+  const handlePaddleModelRequest = async (req: express.Request, res: express.Response) => {
+    const type = (req.params.type || '').toLowerCase();
+    const config = PADDLE_MODEL_CONFIGS[type];
+    if (!config) {
+      res.status(404).json({ error: `Model type '${type}' not found. Supported types: det, rec, dict` });
+      return;
+    }
+
+    const candidatePaths = [
+      path.join(process.cwd(), 'public', config.filename),
+      path.join(process.cwd(), 'public', 'models', config.filename),
+      path.join(process.cwd(), 'dist', config.filename),
+      path.join(process.cwd(), 'dist', 'models', config.filename),
+      path.join(os.tmpdir(), config.filename),
+    ];
+
+    let foundPath: string | null = null;
+    for (const p of candidatePaths) {
+      if (fs.existsSync(p)) {
+        const stat = fs.statSync(p);
+        if (stat.size >= config.minSize) {
+          foundPath = p;
+          break;
+        }
+      }
+    }
+
+    if (foundPath) {
+      const stat = fs.statSync(foundPath);
+      res.setHeader('Content-Type', config.contentType);
+      res.setHeader('Content-Length', stat.size);
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      fs.createReadStream(foundPath).pipe(res);
+      return;
+    }
+
+    // If not found locally, fetch from remote CDN and stream while caching
+    try {
+      console.log(`[PaddleOCR Model Server] Downloading ${config.filename} from ${config.remoteUrl}...`);
+      const remoteRes = await fetch(config.remoteUrl);
+      if (!remoteRes.ok) {
+        res.status(remoteRes.status).send(`Failed to fetch ${config.filename} from remote mirror: HTTP ${remoteRes.status}`);
+        return;
+      }
+
+      const buffer = Buffer.from(await remoteRes.arrayBuffer());
+      if (buffer.length < config.minSize) {
+        res.status(502).send(`Downloaded file ${config.filename} too small (${buffer.length} < ${config.minSize} bytes)`);
+        return;
+      }
+
+      // Cache to public and temp directories
+      try {
+        const publicDir = path.join(process.cwd(), 'public');
+        fs.mkdirSync(publicDir, { recursive: true });
+        fs.writeFileSync(path.join(publicDir, config.filename), buffer);
+      } catch (_) {}
+
+      res.setHeader('Content-Type', config.contentType);
+      res.setHeader('Content-Length', buffer.length);
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.send(buffer);
+    } catch (err: any) {
+      console.error(`[PaddleOCR Model Server Error for ${config.filename}]`, err);
+      res.status(500).send(`Error downloading PaddleOCR model ${config.filename}: ${err?.message || err}`);
+    }
+  };
+
+  app.get('/api/paddle-models/:type', handlePaddleModelRequest);
+  app.get('/api/ocr/model/:type', handlePaddleModelRequest);
+
   // Shared GenAI helper with Proxy & Custom Model support
   const getAiClientAndModel = (body: any = {}) => {
     const apiMode = body.apiMode || 'direct';
