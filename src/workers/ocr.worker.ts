@@ -100,11 +100,16 @@ function sanitizeDictionaryBuffer(buffer: ArrayBuffer | string): ArrayBuffer {
 function isProtobufValidHeader(buf: ArrayBuffer | null | undefined): boolean {
   if (!buf || buf.byteLength < 100000) return false;
   const u8 = new Uint8Array(buf, 0, Math.min(64, buf.byteLength));
-  if (u8[0] !== 0x08) return false;
-  for (let i = 0; i < u8.length - 2; i++) {
-    if (u8[i] === 0xef && u8[i + 1] === 0xbf && u8[i + 2] === 0xbd) {
-      return false;
-    }
+  const headStr = new TextDecoder('utf-8').decode(u8.subarray(0, 64)).toLowerCase();
+  if (
+    headStr.includes('<html') ||
+    headStr.includes('<!doc') ||
+    headStr.includes('{"') ||
+    headStr.includes('error') ||
+    headStr.includes('git-lfs') ||
+    headStr.includes('version https://')
+  ) {
+    return false;
   }
   return true;
 }
@@ -139,10 +144,17 @@ self.onmessage = async (e: MessageEvent) => {
         const logicalCores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
         ort.env.logLevel = 'error';
         ort.env.wasm.simd = true;
-        // Force single-thread WASM inside each worker to prevent CPU oversubscription and context-switch overhead (Task Parallelism)
+        // Single thread per worker for task-parallel pool
         ort.env.wasm.numThreads = 1;
         ort.env.wasm.proxy = false;
-        ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/';
+        ort.env.wasm.wasmPaths = {
+          'ort-wasm-simd-threaded.wasm': '/ort-wasm/ort-wasm-simd-threaded.wasm',
+          'ort-wasm-simd-threaded.jsep.wasm': '/ort-wasm/ort-wasm-simd-threaded.jsep.wasm',
+          'ort-wasm-simd-threaded.asyncify.wasm': '/ort-wasm/ort-wasm-simd-threaded.asyncify.wasm',
+          'ort-wasm-simd-threaded.jspi.wasm': '/ort-wasm/ort-wasm-simd-threaded.jspi.wasm',
+          'ort-wasm-simd.wasm': 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/ort-wasm-simd-threaded.wasm',
+          'ort-wasm.wasm': 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/ort-wasm-simd-threaded.wasm',
+        } as any;
 
         // WebGPU power options
         if (typeof ort.env.webgpu === 'object' && ort.env.webgpu !== null) {
@@ -160,27 +172,27 @@ self.onmessage = async (e: MessageEvent) => {
 
         if (!detBuf) {
           detBuf = await fetchResourceBuffer([
+            '/api/paddle-models/det',
             '/models/PaddleOCRv6-tiny-det.onnx',
             '/PaddleOCRv6-tiny-det.onnx',
-            '/api/paddle-models/det',
-            '/api/ocr/model/det',
+            'https://media.githubusercontent.com/media/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/detection/ort/PP-OCRv6_tiny_det.ort',
           ]);
         }
 
         if (!recBuf) {
           recBuf = await fetchResourceBuffer([
+            '/api/paddle-models/rec',
             '/models/PaddleOCRv6-tiny-rec.onnx',
             '/PaddleOCRv6-tiny-rec.onnx',
-            '/api/paddle-models/rec',
-            '/api/ocr/model/rec',
+            'https://media.githubusercontent.com/media/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/recognition/ort/PP-OCRv6_tiny_rec.ort',
           ]);
         }
 
         if (!cleanDictBuf) {
           cleanDictBuf = await fetchResourceBuffer([
+            '/api/paddle-models/dict',
             '/models/ppocrv6_tiny_dict.txt',
             '/ppocrv6_tiny_dict.txt',
-            '/api/paddle-models/dict',
             'https://raw.githubusercontent.com/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/recognition/ppocrv6_tiny_dict.txt',
           ], true);
         }
@@ -189,15 +201,15 @@ self.onmessage = async (e: MessageEvent) => {
           throw new Error('Không thể tải tệp trọng số ONNX Model PaddleOCR PP-OCRv6 Tiny');
         }
 
-        // Fast detection: only request valid WebGPU or WASM backends
-        const providers: string[] = [];
-        if (hasWebGpu) providers.push('webgpu');
-        providers.push('wasm');
+        const providers: string[] = ['wasm'];
+        if (hasWebGpu) {
+          providers.unshift('webgpu');
+        }
 
         ocrService = new PaddleOcrService({
           model: {
-            detection: detBuf,
-            recognition: recBuf,
+            detection: new Uint8Array(detBuf),
+            recognition: new Uint8Array(recBuf),
             charactersDictionary: cleanDictBuf || undefined,
           },
           detection: {
@@ -295,8 +307,8 @@ self.onmessage = async (e: MessageEvent) => {
 
           ocrService = new PaddleOcrService({
             model: {
-              detection: detBuf,
-              recognition: recBuf,
+              detection: new Uint8Array(detBuf),
+              recognition: new Uint8Array(recBuf),
               charactersDictionary: cleanDictBuf || undefined,
             },
             session: {
