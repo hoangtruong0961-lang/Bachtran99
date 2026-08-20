@@ -846,8 +846,9 @@ export class StreamingOcrPool {
   private pendingDuplicateFrames: Map<number, LocalFrameItem[]> = new Map(); // parentTimestamp -> childFrames[]
   private completedOcrResultsMap: Map<number, { text: string; timestamp: number; confidence?: number } | null> = new Map();
 
-  // Track last detected subtitle text for live UI feedback
-  private lastDetectedText: string = '';
+  // Subtitle ROI Auto-Calibration State
+  private roiCalibrator: SubtitleRoiCalibrator = new SubtitleRoiCalibrator();
+  private hasLoggedRoiLock: boolean = false;
   private sourceLang: string = 'zh_cn';
   private targetLang: string = 'Tiếng Việt';
 
@@ -889,8 +890,17 @@ export class StreamingOcrPool {
             this.detectedItems.push(res);
             this.completedOcrResultsMap.set(res.timestamp, res);
 
-            if (res.text && res.text.trim().length > 0) {
-              this.lastDetectedText = res.text.trim();
+            // SubtitleRoiCalibrator: Calibrate active subtitle vertical band when text is detected
+            if (res.text && res.text.trim().length > 0 && this.lastRefFramePixels) {
+              const estimated = estimateTextVerticalRoi(this.lastRefFramePixels, 320, 180);
+              if (estimated) {
+                this.roiCalibrator.recordDetection(estimated.yPercent, estimated.heightPercent);
+                const locked = this.roiCalibrator.getLockedRoi();
+                if (locked.isCalibrated && !this.hasLoggedRoiLock) {
+                  this.hasLoggedRoiLock = true;
+                  console.log(`[ROI Calibrator] 🔒 Đã khoá dải phụ đề Y: ${locked.calibratedYPercent}% - H: ${locked.calibratedHeightPercent}% (${locked.sampleCount} mẫu, giảm ~75% diện tích quét)`);
+                }
+              }
             }
 
             // Resolve pending duplicate child frames
@@ -1134,8 +1144,7 @@ export class StreamingOcrPool {
     const pct = Math.min(100, Math.round((completedCount / totalPushed) * 100));
     const busyWorkers = this.workers.filter((w) => w.inFlightCount > 0).length;
 
-    const textPreview = this.lastDetectedText ? ` | 📝 Đang đọc: "${this.lastDetectedText}"` : '';
-    const msg = `🚀 [Đa luồng ${this.poolSize} Web Workers | Bận: ${busyWorkers}/${this.poolSize}] Đang bóc tách OCR: ${completedCount}/${totalPushed} khung (${pct}%)${textPreview}`;
+    const msg = `🚀 [Đa luồng Pool ${this.poolSize} Web Workers | Active: ${busyWorkers}/${this.poolSize}] Đang bóc OCR: ${completedCount}/${totalPushed} khung (${pct}%) | Bỏ qua trùng: ${this.skippedDuplicateCount} khung`;
     this.latestProgressMessage = msg;
     if (this.onProgress) {
       this.onProgress(msg);
@@ -1167,12 +1176,20 @@ export class StreamingOcrPool {
 
       this.reportProgress();
 
+      const lockedRoi = this.roiCalibrator.getLockedRoi();
+
       const processedFrames = batch.map((f) => {
         let pBuf: Uint8ClampedArray | undefined = f.pixelData;
         let w = f.width;
         let h = f.height;
 
-        if (pBuf && pBuf.byteLength > 0 && pBuf.buffer && pBuf.buffer.byteLength > 0) {
+        // SubtitleRoiCalibrator: Crop to locked subtitle vertical strip & cap width to 960 to reduce inference size by ~75-85%
+        if (lockedRoi.isCalibrated && pBuf && w && h && w > 0 && h > 0) {
+          const cropRes = cropPixelDataVertical(pBuf, w, h, lockedRoi.calibratedYPercent, lockedRoi.calibratedHeightPercent, 960);
+          pBuf = cropRes.cropped;
+          w = cropRes.width;
+          h = cropRes.height;
+        } else if (pBuf && pBuf.byteLength > 0 && pBuf.buffer && pBuf.buffer.byteLength > 0) {
           pBuf = new Uint8ClampedArray(pBuf.buffer, pBuf.byteOffset, pBuf.byteLength);
         } else {
           pBuf = undefined;

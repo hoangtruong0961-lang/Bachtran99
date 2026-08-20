@@ -142,6 +142,36 @@ async function fetchResourceBuffer(candidates: string[], isDict: boolean = false
   return null;
 }
 
+const CDN_ORT_WASM_BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/';
+
+async function resolveWasmPaths(): Promise<string | Record<string, string>> {
+  try {
+    const probe = await fetch('/ort-wasm/ort-wasm-simd-threaded.wasm', { method: 'GET' });
+    if (probe.ok) {
+      const cType = (probe.headers.get('content-type') || '').toLowerCase();
+      if (!cType.includes('text/html')) {
+        const ab = await probe.arrayBuffer();
+        const u8 = new Uint8Array(ab);
+        // Check WASM binary magic header: 0x00 0x61 0x73 0x6d ('\0asm')
+        if (u8.length >= 4 && u8[0] === 0x00 && u8[1] === 0x61 && u8[2] === 0x73 && u8[3] === 0x6d) {
+          return {
+            'ort-wasm-simd-threaded.wasm': '/ort-wasm/ort-wasm-simd-threaded.wasm',
+            'ort-wasm-simd-threaded.jsep.wasm': '/ort-wasm/ort-wasm-simd-threaded.jsep.wasm',
+            'ort-wasm-simd-threaded.asyncify.wasm': '/ort-wasm/ort-wasm-simd-threaded.asyncify.wasm',
+            'ort-wasm-simd-threaded.jspi.wasm': '/ort-wasm/ort-wasm-simd-threaded.jspi.wasm',
+            'ort-wasm-simd.wasm': CDN_ORT_WASM_BASE + 'ort-wasm-simd.wasm',
+            'ort-wasm.wasm': CDN_ORT_WASM_BASE + 'ort-wasm.wasm',
+            'ort-wasm-threaded.wasm': CDN_ORT_WASM_BASE + 'ort-wasm-threaded.wasm',
+          };
+        }
+      }
+    }
+  } catch (_) {}
+
+  // Fallback to high-speed CDN jsDelivr for complete WASM bundle
+  return CDN_ORT_WASM_BASE;
+}
+
 let isWorkerBusyHandling = false;
 const workerIncomingQueue: MessageEvent[] = [];
 
@@ -177,14 +207,9 @@ async function handleWorkerIncomingMessage(e: MessageEvent) {
         // Single thread per worker for task-parallel pool
         ort.env.wasm.numThreads = 1;
         ort.env.wasm.proxy = false;
-        ort.env.wasm.wasmPaths = {
-          'ort-wasm-simd-threaded.wasm': '/ort-wasm/ort-wasm-simd-threaded.wasm',
-          'ort-wasm-simd-threaded.jsep.wasm': '/ort-wasm/ort-wasm-simd-threaded.jsep.wasm',
-          'ort-wasm-simd-threaded.asyncify.wasm': '/ort-wasm/ort-wasm-simd-threaded.asyncify.wasm',
-          'ort-wasm-simd-threaded.jspi.wasm': '/ort-wasm/ort-wasm-simd-threaded.jspi.wasm',
-          'ort-wasm-simd.wasm': 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/ort-wasm-simd-threaded.wasm',
-          'ort-wasm.wasm': 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/ort-wasm-simd-threaded.wasm',
-        } as any;
+        
+        // Dynamically resolve WASM paths with local magic header check & CDN jsDelivr fallback
+        ort.env.wasm.wasmPaths = await resolveWasmPaths();
 
         // WebGPU power options
         if (typeof ort.env.webgpu === 'object' && ort.env.webgpu !== null) {
@@ -206,6 +231,7 @@ async function handleWorkerIncomingMessage(e: MessageEvent) {
             '/models/PaddleOCRv6-tiny-det.onnx',
             '/PaddleOCRv6-tiny-det.onnx',
             'https://media.githubusercontent.com/media/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/detection/ort/PP-OCRv6_tiny_det.ort',
+            'https://raw.githubusercontent.com/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/detection/ort/PP-OCRv6_tiny_det.ort',
           ]);
         }
 
@@ -215,6 +241,7 @@ async function handleWorkerIncomingMessage(e: MessageEvent) {
             '/models/PaddleOCRv6-tiny-rec.onnx',
             '/PaddleOCRv6-tiny-rec.onnx',
             'https://media.githubusercontent.com/media/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/recognition/ort/PP-OCRv6_tiny_rec.ort',
+            'https://raw.githubusercontent.com/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/recognition/ort/PP-OCRv6_tiny_rec.ort',
           ]);
         }
 
@@ -302,6 +329,12 @@ async function handleWorkerIncomingMessage(e: MessageEvent) {
     } catch (err: any) {
       console.warn(`[OCR Worker #${currentWorkerId}] ppu-paddle-ocr init attempt 1 warning:`, err);
       try {
+        // Enforce global CDN wasmPaths on fallback
+        try {
+          ort.env.wasm.wasmPaths = CDN_ORT_WASM_BASE;
+          ort.env.wasm.numThreads = 1;
+        } catch (_) {}
+
         if (!ocrService) {
           let detBuf = incomingDet && incomingDet.byteLength > 100000 ? incomingDet : null;
           let recBuf = incomingRec && incomingRec.byteLength > 100000 ? incomingRec : null;
@@ -309,25 +342,30 @@ async function handleWorkerIncomingMessage(e: MessageEvent) {
 
           if (!detBuf) {
             detBuf = await fetchResourceBuffer([
+              '/api/paddle-models/det',
               '/models/PaddleOCRv6-tiny-det.onnx',
               '/PaddleOCRv6-tiny-det.onnx',
-              '/api/paddle-models/det',
+              'https://media.githubusercontent.com/media/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/detection/ort/PP-OCRv6_tiny_det.ort',
+              'https://raw.githubusercontent.com/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/detection/ort/PP-OCRv6_tiny_det.ort',
             ]);
           }
 
           if (!recBuf) {
             recBuf = await fetchResourceBuffer([
+              '/api/paddle-models/rec',
               '/models/PaddleOCRv6-tiny-rec.onnx',
               '/PaddleOCRv6-tiny-rec.onnx',
-              '/api/paddle-models/rec',
+              'https://media.githubusercontent.com/media/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/recognition/ort/PP-OCRv6_tiny_rec.ort',
+              'https://raw.githubusercontent.com/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/recognition/ort/PP-OCRv6_tiny_rec.ort',
             ]);
           }
 
           if (!cleanDictBuf) {
             cleanDictBuf = await fetchResourceBuffer([
+              '/api/paddle-models/dict',
               '/models/ppocrv6_tiny_dict.txt',
               '/ppocrv6_tiny_dict.txt',
-              '/api/paddle-models/dict',
+              'https://raw.githubusercontent.com/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main/recognition/ppocrv6_tiny_dict.txt',
             ], true);
           }
 
@@ -377,8 +415,7 @@ async function handleWorkerIncomingMessage(e: MessageEvent) {
       const results: { timestamp: number; text: string; confidence?: number; deepScan?: boolean }[] = [];
       let skippedFramesCount = 0;
       const { sourceLang, targetLang, enableDeepScan = true } = e.data;
-      // CRITICAL: isLatin MUST be evaluated strictly against the video's SOURCE language being recognized in the frames!
-      const isLatin = isLatinLanguage(sourceLang);
+      const isLatin = isLatinLanguage(sourceLang) || isLatinLanguage(targetLang);
 
       self.postMessage({
         type: 'PROGRESS',
@@ -406,6 +443,7 @@ async function handleWorkerIncomingMessage(e: MessageEvent) {
                 continue;
               }
 
+              // Apply simulated JPEG "black background filtering" (Thresholding Noise Filter) on raw pixel byte array
               let typedArray: Uint8ClampedArray;
               if (item.pixelData instanceof Uint8ClampedArray) {
                 typedArray = item.pixelData;
@@ -416,6 +454,8 @@ async function handleWorkerIncomingMessage(e: MessageEvent) {
               } else {
                 typedArray = new Uint8ClampedArray(item.pixelData);
               }
+
+              applyThresholdingNoiseFilter(typedArray, item.width, item.height);
 
               if (typeof OffscreenCanvas !== 'undefined') {
                 if (!usedOffscreen || usedOffscreen.width !== item.width || usedOffscreen.height !== item.height) {

@@ -4279,8 +4279,50 @@ ${JSON.stringify(compactChunk)}`;
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
+    const publicPath = path.join(process.cwd(), 'public');
+
+    // Dedicated handler for /ort-wasm to ensure .wasm MIME types & auto-fallback to CDN if missing on disk
+    app.get('/ort-wasm/:filename', (req, res) => {
+      const filename = req.params.filename;
+      const candidates = [
+        path.join(distPath, 'ort-wasm', filename),
+        path.join(publicPath, 'ort-wasm', filename),
+      ];
+      for (const p of candidates) {
+        if (fs.existsSync(p)) {
+          if (filename.endsWith('.wasm')) {
+            res.setHeader('Content-Type', 'application/wasm');
+          }
+          return res.sendFile(p);
+        }
+      }
+      // If missing on disk on cloud environments, redirect to official jsDelivr CDN
+      return res.redirect(`https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/${encodeURIComponent(filename)}`);
+    });
+
+    // Dedicated handler for /models to ensure model files are not served as HTML
+    app.get('/models/:filename', (req, res) => {
+      const filename = req.params.filename;
+      const candidates = [
+        path.join(distPath, 'models', filename),
+        path.join(publicPath, 'models', filename),
+      ];
+      for (const p of candidates) {
+        if (fs.existsSync(p)) {
+          return res.sendFile(p);
+        }
+      }
+      return res.status(404).send('Model file not found');
+    });
+
     app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
+
+    // Never return index.html for missing asset/binary extensions
+    app.get('*', (req, res) => {
+      const ext = path.extname(req.path).toLowerCase();
+      if (['.wasm', '.onnx', '.ort', '.mjs', '.map', '.bin', '.txt', '.png', '.jpg', '.svg'].includes(ext)) {
+        return res.status(404).send('Asset not found');
+      }
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
