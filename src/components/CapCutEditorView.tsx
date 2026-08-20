@@ -1219,7 +1219,7 @@ export const CapCutEditorView: React.FC<CapCutEditorViewProps> = ({
           filteredNoTextCount++;
         } else {
           // Optimization: Skip heavy synchronous toDataURL('image/jpeg') Base64 encoding on main UI thread for Local PaddleOCR
-          const base64 = isLocalPaddle ? undefined : item.canvas?.toDataURL('image/jpeg', 0.88);
+          const base64 = isLocalPaddle ? undefined : item.canvas.toDataURL('image/jpeg', 0.88);
           const frameItem = {
             image: base64,
             pixelData: item.pixelData,
@@ -1271,7 +1271,7 @@ export const CapCutEditorView: React.FC<CapCutEditorViewProps> = ({
           totalWorkers,
           message: streamingOcrPool && streamingOcrPool.latestProgressMessage
             ? streamingOcrPool.latestProgressMessage
-            : `⚡ [Song song WebCodecs + Đa luồng PaddleOCR] (${Math.round(timeProgress * 100)}% | ${item.timestamp.toFixed(1)}s/${endT.toFixed(1)}s)...`,
+            : `⚡ [Song song WebCodecs + 8 Luồng PaddleOCR] (${Math.round(timeProgress * 100)}% | ${item.timestamp.toFixed(1)}s/${endT.toFixed(1)}s)...`,
         }));
       },
     });

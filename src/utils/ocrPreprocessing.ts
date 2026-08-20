@@ -15,6 +15,9 @@ import {
   enhanceImageOpenCV,
 } from './openCvEngine';
 
+// Non-blocking initialization of OpenCV WASM engine in background
+initOpenCV().catch(() => {});
+
 export interface TextPresenceDecision {
   hasText: boolean;
   edgeNonZero: number;

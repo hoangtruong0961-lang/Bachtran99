@@ -9,29 +9,11 @@ let cvInitPromise: Promise<boolean> | null = null;
 let isOpenCvReady = false;
 
 /**
- * Helper to check if current environment is mobile or memory-constrained
- */
-function isConstrainedEnvironment(): boolean {
-  if (typeof window === 'undefined') return true; // Worker environment
-  if (typeof (self as any).importScripts === 'function') return true;
-  if (typeof navigator === 'undefined') return false;
-  
-  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent || '');
-  const lowMem = (navigator as any).deviceMemory && (navigator as any).deviceMemory < 4;
-  return isMobile || !!lowMem;
-}
-
-/**
  * Asynchronously initialize OpenCV.js WebAssembly Module
  */
 export async function initOpenCV(): Promise<boolean> {
   if (isOpenCvReady && cvInstance) return true;
   if (cvInitPromise) return cvInitPromise;
-
-  // Never load OpenCV in Web Workers or mobile to prevent WebAssembly OOM memory starvation
-  if (isConstrainedEnvironment()) {
-    return false;
-  }
 
   cvInitPromise = (async () => {
     try {
@@ -80,7 +62,7 @@ export async function initOpenCV(): Promise<boolean> {
         return true;
       }
     } catch (err) {
-      console.warn('[OpenCV.js WASM Init] Notice: using fast native JS vision engine for frame pre-filtering.');
+      console.warn('[OpenCV.js WASM Init] Failed to load OpenCV WASM module, fallback to JS loops:', err);
     }
     return false;
   })();
