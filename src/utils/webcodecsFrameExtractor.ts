@@ -101,6 +101,24 @@ async function copyVideoFrameRoiDirect(
   return false;
 }
 
+function getTrackDescription(mp4File: any, trackId: number): Uint8Array | undefined {
+  try {
+    const trak = mp4File.getTrackById(trackId);
+    if (trak?.mdia?.minf?.stbl?.stsd?.entries?.[0]) {
+      const entry = trak.mdia.minf.stbl.stsd.entries[0];
+      const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C;
+      if (box) {
+        const stream = new DataStream(undefined, 0, DataStream.BIG_ENDIAN) as any;
+        box.write(stream);
+        if (stream.position && stream.position > 8) {
+          return new Uint8Array(stream.buffer.slice(8, stream.position));
+        }
+      }
+    }
+  } catch (_e) {}
+  return undefined;
+}
+
 /**
  * METHOD 1: True WebCodecs VideoDecoder API + MP4Box Demuxer
  * High-performance 2-pass pipeline with direct VideoFrame.copyTo() ROI extraction,
@@ -138,428 +156,340 @@ export async function extractFramesTrueWebCodecs(options: FrameExtractorOptions)
 
   if (shouldCancel && shouldCancel()) return 0;
 
-  return new Promise<number>((resolve, reject) => {
+  return new Promise<number>(async (resolve, reject) => {
     try {
-      const mp4File = createMp4File();
-      let videoTrack: any = null;
+      const demuxResult = await new Promise<{ config: VideoDecoderConfig; samples: any[] }>((resolveDemux, rejectDemux) => {
+        const mp4File = createMp4File();
+        let videoTrack: any = null;
+        const allSamples: any[] = [];
+        let isReady = false;
+        let isSettled = false;
 
-      mp4File.onReady = (info: any) => {
-        if (!info.videoTracks || info.videoTracks.length === 0) {
-          reject(new Error('Không tìm thấy luồng Video Track trong tệp MP4.'));
-          return;
-        }
+        const timeout = setTimeout(() => {
+          if (!isSettled) {
+            isSettled = true;
+            rejectDemux(new Error('MP4Box parsing timeout (tệp không phải MP4 tiêu chuẩn hoặc thiếu moov atom)'));
+          }
+        }, 3500);
 
-        videoTrack = info.videoTracks[0];
+        mp4File.onError = (err: any) => {
+          if (!isSettled) {
+            isSettled = true;
+            clearTimeout(timeout);
+            const msg = typeof err === 'string' ? err : err?.message || (typeof err === 'object' && Object.keys(err).length > 0 ? JSON.stringify(err) : 'MP4Box demuxer error');
+            rejectDemux(new Error(msg));
+          }
+        };
 
-        let description: Uint8Array | undefined = undefined;
+        mp4File.onReady = (info: any) => {
+          isReady = true;
+          if (!info.videoTracks || info.videoTracks.length === 0) {
+            if (!isSettled) {
+              isSettled = true;
+              clearTimeout(timeout);
+              rejectDemux(new Error('Không tìm thấy luồng Video Track trong tệp MP4.'));
+            }
+            return;
+          }
+
+          videoTrack = info.videoTracks[0];
+          const totalSamples = videoTrack.nb_samples || 500000;
+          mp4File.setExtractionOptions(videoTrack.id, null, { nbSamples: totalSamples });
+          mp4File.start();
+        };
+
+        mp4File.onSamples = (_id: number, _user: any, extractedSamples: any[]) => {
+          if (extractedSamples && extractedSamples.length > 0) {
+            allSamples.push(...extractedSamples);
+          }
+        };
+
         try {
-          const trak = mp4File.getTrackById(videoTrack.id);
-          if (trak?.mdia?.minf?.stbl?.stsd?.entries?.[0]) {
-            const entry = trak.mdia.minf.stbl.stsd.entries[0];
-            const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C;
-            if (box) {
-              const stream = new DataStream(undefined, 0, DataStream.BIG_ENDIAN);
-              box.write(stream);
-              description = new Uint8Array(stream.buffer, 8);
+          (arrayBuffer as any).fileStart = 0;
+          mp4File.appendBuffer(arrayBuffer);
+          mp4File.flush();
+
+          setTimeout(() => {
+            if (isSettled) return;
+            isSettled = true;
+            clearTimeout(timeout);
+
+            if (!isReady || !videoTrack) {
+              rejectDemux(new Error('MP4Box không tìm thấy Video Track hợp lệ trong tệp video (có thể là WebM/MKV hoặc định dạng không hỗ trợ)'));
+              return;
+            }
+
+            const description = getTrackDescription(mp4File, videoTrack.id);
+            const decoderConfig: VideoDecoderConfig = {
+              codec: videoTrack.codec,
+              codedWidth: videoTrack.video.width,
+              codedHeight: videoTrack.video.height,
+              description,
+              hardwareAcceleration: 'prefer-hardware',
+              optimizeForLatency: true,
+            } as any;
+
+            resolveDemux({ config: decoderConfig, samples: allSamples });
+          }, 80);
+        } catch (appendErr: any) {
+          if (!isSettled) {
+            isSettled = true;
+            clearTimeout(timeout);
+            rejectDemux(new Error(`Lỗi appendBuffer MP4Box: ${appendErr?.message || String(appendErr)}`));
+          }
+        }
+      });
+
+      if (shouldCancel && shouldCancel()) {
+        resolve(0);
+        return;
+      }
+
+      let decoderConfig = demuxResult.config;
+      const samples = demuxResult.samples;
+
+      if (typeof VideoDecoder !== 'undefined' && typeof VideoDecoder.isConfigSupported === 'function') {
+        try {
+          const res = await VideoDecoder.isConfigSupported(decoderConfig);
+          console.log(`[WebCodecs Extract GPU Verification] Supported: ${res.supported} | Codec: ${res.config?.codec || decoderConfig.codec}`);
+          if (!res.supported) {
+            const altConfig = { ...decoderConfig, hardwareAcceleration: 'prefer-software' } as VideoDecoderConfig;
+            const altRes = await VideoDecoder.isConfigSupported(altConfig);
+            if (altRes.supported) {
+              decoderConfig = altConfig;
             }
           }
-        } catch (_e) {}
+        } catch (err) {
+          console.warn('[WebCodecs Extract GPU Verification] Error:', err);
+        }
+      }
 
-        const decoderConfig: VideoDecoderConfig = {
-          codec: videoTrack.codec,
-          codedWidth: videoTrack.video.width,
-          codedHeight: videoTrack.video.height,
-          description,
-          hardwareAcceleration: 'prefer-hardware',
-          optimizeForLatency: true,
-        } as any;
+      // Filter relevant samples in target window
+      const validSamples = samples.filter((s) => {
+        const tSec = s.cts / s.timescale;
+        return tSec >= startT - 1.0 && tSec <= endT + 1.0;
+      });
 
-        if (typeof VideoDecoder !== 'undefined' && typeof VideoDecoder.isConfigSupported === 'function') {
-          VideoDecoder.isConfigSupported(decoderConfig).then((res) => {
-            console.log(`[WebCodecs Extract GPU Verification] Supported: ${res.supported} | HW Accel: ${res.config?.hardwareAcceleration || 'prefer-hardware'} | Codec: ${res.config?.codec || videoTrack.codec}`);
-          }).catch((err) => {
-            console.warn('[WebCodecs Extract GPU Verification] Error:', err);
+      if (validSamples.length === 0) {
+        resolve(0);
+        return;
+      }
+
+      // Group samples into GOPs (Group of Pictures bounded by keyframes)
+      interface SampleGop {
+        gopIdx: number;
+        keyframe: any;
+        deltas: any[];
+        startSec: number;
+        endSec: number;
+        isActive: boolean;
+      }
+
+      const gops: SampleGop[] = [];
+      let currentGop: SampleGop | null = null;
+
+      for (const sample of validSamples) {
+        const tSec = sample.cts / sample.timescale;
+        if (sample.is_sync || !currentGop) {
+          currentGop = {
+            gopIdx: gops.length,
+            keyframe: sample,
+            deltas: [],
+            startSec: tSec,
+            endSec: tSec,
+            isActive: true, // Default active, evaluated in Pass 1
+          };
+          gops.push(currentGop);
+        } else {
+          currentGop.deltas.push(sample);
+          currentGop.endSec = tSec;
+        }
+      }
+
+      if (onProgress) {
+        onProgress(0, 100, `🚀 [Pass 1/2] Phân tích ${gops.length} keyframe khoanh vùng thoại (Coarse Scan)...`);
+      }
+
+      // PASS 1: Keyframe Coarse Scan to detect silent non-subtitle regions
+      const keyframeInfoMap = new Map<number, { hasText: boolean; diffScore: number }>();
+
+      if (gops.length > 2) {
+        await new Promise<void>((pass1Resolve) => {
+          let prevKfBuffer: Uint8ClampedArray | null = null;
+          let decodedKeyframeIdx = 0;
+
+          const fallbackCanvas = typeof OffscreenCanvas !== 'undefined'
+            ? new OffscreenCanvas(320, 160)
+            : document.createElement('canvas');
+          const fallbackCtx = fallbackCanvas.getContext('2d', { willReadFrequently: true }) as any;
+
+          const pass1Decoder = new VideoDecoder({
+            output: async (frame: VideoFrame) => {
+              const tSec = frame.timestamp / 1_000_000;
+              const vW = frame.codedWidth || frame.displayWidth || 1280;
+              const vH = frame.codedHeight || frame.displayHeight || 720;
+
+              const cropX = Math.max(0, Math.floor((roi.x / 100) * vW));
+              const cropY = Math.max(0, Math.floor((roi.y / 100) * vH));
+              const cropW = Math.max(16, Math.floor((roi.width / 100) * vW));
+              const cropH = Math.max(16, Math.floor((roi.height / 100) * vH));
+
+              const cropBuffer = new Uint8ClampedArray(cropW * cropH * 4);
+              await copyVideoFrameRoiDirect(frame, cropX, cropY, cropW, cropH, cropBuffer, fallbackCanvas, fallbackCtx);
+              frame.close();
+
+              applyThresholdingNoiseFilter(cropBuffer, cropW, cropH);
+              let diffScore = 0;
+              if (prevKfBuffer && prevKfBuffer.length === cropBuffer.length) {
+                diffScore = computeFrameDiffScore(cropBuffer, prevKfBuffer, cropW, cropH);
+              }
+              prevKfBuffer = cropBuffer;
+
+              const presence = detectTextPresenceInFrame(cropBuffer, cropW, cropH);
+              keyframeInfoMap.set(Number(tSec.toFixed(2)), {
+                hasText: presence.hasText,
+                diffScore,
+              });
+
+              decodedKeyframeIdx++;
+            },
+            error: (err) => {
+              console.warn('Pass 1 Keyframe Decoder warning:', err?.message || err);
+              pass1Resolve();
+            },
           });
-        }
 
-        // MUST set _decoderConfig BEFORE mp4File.start() because start() fires onSamples synchronously
-        (mp4File as any)._decoderConfig = decoderConfig;
-
-        const totalSamples = videoTrack.nb_samples || 500000;
-        mp4File.setExtractionOptions(videoTrack.id, null, { nbSamples: totalSamples });
-        mp4File.start();
-      };
-
-      const allSamples: any[] = [];
-      mp4File.onSamples = (id: number, user: any, samples: any[]) => {
-        allSamples.push(...samples);
-      };
-
-      const processAllSamples = async (samples: any[]) => {
-        if (shouldCancel && shouldCancel()) {
-          resolve(0);
-          return;
-        }
-
-        const decoderConfig: VideoDecoderConfig = (mp4File as any)._decoderConfig;
-        if (!decoderConfig) {
-          reject(new Error('Thiếu cấu hình VideoDecoder configuration.'));
-          return;
-        }
-
-        // Filter relevant samples in target window
-        const validSamples = samples.filter((s) => {
-          const tSec = s.cts / s.timescale;
-          return tSec >= startT - 1.0 && tSec <= endT + 1.0;
+          try {
+            try {
+              pass1Decoder.configure(decoderConfig);
+            } catch (_cfgErr) {
+              const altConfig = { ...decoderConfig };
+              delete (altConfig as any).description;
+              pass1Decoder.configure(altConfig);
+            }
+            for (const gop of gops) {
+              const sample = gop.keyframe;
+              const chunk = new EncodedVideoChunk({
+                type: 'key',
+                timestamp: (sample.cts * 1_000_000) / sample.timescale,
+                duration: (sample.duration * 1_000_000) / sample.timescale,
+                data: sample.data,
+              });
+              pass1Decoder.decode(chunk);
+            }
+            pass1Decoder.flush().then(() => pass1Resolve()).catch(() => pass1Resolve());
+          } catch (_err) {
+            pass1Resolve();
+          }
         });
 
-        if (validSamples.length === 0) {
-          resolve(0);
-          return;
-        }
+        // Evaluate quiet GOPs
+        for (let i = 0; i < gops.length - 1; i++) {
+          const g1 = gops[i];
+          const g2 = gops[i + 1];
+          const info1 = keyframeInfoMap.get(Number(g1.startSec.toFixed(2)));
+          const info2 = keyframeInfoMap.get(Number(g2.startSec.toFixed(2)));
 
-        // Group samples into GOPs (Group of Pictures bounded by keyframes)
-        interface SampleGop {
-          gopIdx: number;
-          keyframe: any;
-          deltas: any[];
-          startSec: number;
-          endSec: number;
-          isActive: boolean;
-        }
-
-        const gops: SampleGop[] = [];
-        let currentGop: SampleGop | null = null;
-
-        for (const sample of validSamples) {
-          const tSec = sample.cts / sample.timescale;
-          if (sample.is_sync || !currentGop) {
-            currentGop = {
-              gopIdx: gops.length,
-              keyframe: sample,
-              deltas: [],
-              startSec: tSec,
-              endSec: tSec,
-              isActive: true, // Default active, evaluated in Pass 1
-            };
-            gops.push(currentGop);
-          } else {
-            currentGop.deltas.push(sample);
-            currentGop.endSec = tSec;
+          if (info1 && info2) {
+            const gopDuration = g2.startSec - g1.startSec;
+            // Safe threshold: If GOP is longer than 1.0 seconds, we never mark it silent.
+            // Long GOPs (commonly produced on static/black backgrounds) can contain nested subtitles
+            // that don't align with the boundary keyframes, so they must be fully decoded in Pass 2.
+            if (gopDuration <= 1.0) {
+              if (!info1.hasText && !info2.hasText && info2.diffScore < 3.0) {
+                g1.isActive = false; // Mark silent GOP window without subtitles
+              }
+            }
           }
         }
+      }
 
-        if (onProgress) {
-          onProgress(0, 100, `🚀 [Pass 1/2] Phân tích ${gops.length} keyframe khoanh vùng thoại (Coarse Scan)...`);
+      const activeGops = gops.filter((g) => g.isActive);
+
+      // Pre-slice gop.deltas to only include frames up to the last target timestamp in each GOP
+      // This avoids decoding trailing frames in the GOP that are not needed.
+      const targetTimePoints: number[] = [];
+      for (let t = startT; t <= endT + 0.001; t += stepInterval) {
+        targetTimePoints.push(Number(t.toFixed(2)));
+      }
+
+      for (const gop of activeGops) {
+        const gopTargets = targetTimePoints.filter(t => t >= gop.startSec - 0.05 && t <= gop.endSec + 0.05);
+        if (gopTargets.length > 0) {
+          const maxTargetSec = Math.max(...gopTargets);
+          let maxNeededIdx = -1;
+          for (let idx = 0; idx < gop.deltas.length; idx++) {
+            const sTime = gop.deltas[idx].cts / gop.deltas[idx].timescale;
+            if (sTime <= maxTargetSec + 0.15) {
+              maxNeededIdx = idx;
+            }
+          }
+          gop.deltas = gop.deltas.slice(0, maxNeededIdx + 1);
+        } else {
+          // No target points in this GOP, empty its deltas so we only decode the keyframe!
+          gop.deltas = [];
         }
+      }
 
-        // PASS 1: Keyframe Coarse Scan to detect silent non-subtitle regions
-        const keyframeInfoMap = new Map<number, { hasText: boolean; diffScore: number }>();
+      if (onProgress) {
+        onProgress(
+          0,
+          100,
+          `⚡ [Pass 2/2] Bật hardware decoding song song trên ${activeGops.length}/${gops.length} vùng thoại active...`
+        );
+      }
 
-        if (gops.length > 2) {
-          await new Promise<void>((pass1Resolve) => {
-            let prevKfBuffer: Uint8ClampedArray | null = null;
-            let decodedKeyframeIdx = 0;
+      // PASS 2: Parallel VideoDecoder Execution across active GOP chunks - Unlocked up to 16 parallel decoders for maximum CPU/GPU utilization
+      const logicalCores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
+      const maxParallel = Math.min(16, Math.max(2, logicalCores));
+      const numParallel = Math.min(maxParallel, Math.max(1, Math.ceil(activeGops.length / 3)));
+      const chunkSize = Math.ceil(activeGops.length / numParallel);
 
-            const fallbackCanvas = typeof OffscreenCanvas !== 'undefined'
-              ? new OffscreenCanvas(320, 160)
-              : document.createElement('canvas');
-            const fallbackCtx = fallbackCanvas.getContext('2d', { willReadFrequently: true }) as any;
+      let globalCapturedCount = 0;
+      let globalDecodedCount = 0;
+      let lastProgressReportTime = 0;
 
-            const pass1Decoder = new VideoDecoder({
-              output: async (frame: VideoFrame) => {
-                const tSec = frame.timestamp / 1_000_000;
-                const vW = frame.codedWidth || frame.displayWidth || 1280;
-                const vH = frame.codedHeight || frame.displayHeight || 720;
+      const parallelPromises = Array.from({ length: numParallel }).map(async (_, pIdx) => {
+        const chunkGops = activeGops.slice(pIdx * chunkSize, (pIdx + 1) * chunkSize);
+        if (chunkGops.length === 0) return 0;
 
-                const cropX = Math.max(0, Math.floor((roi.x / 100) * vW));
-                const cropY = Math.max(0, Math.floor((roi.y / 100) * vH));
-                const cropW = Math.max(16, Math.floor((roi.width / 100) * vW));
-                const cropH = Math.max(16, Math.floor((roi.height / 100) * vH));
+        return new Promise<number>((pResolve) => {
+          let prevDiffPixelData: Uint8ClampedArray | null = null;
+          let lastEmittedTimestamp = -999;
+          let lastProcessedTimestamp = -999;
+          let workerCaptured = 0;
+          let currentSecondBucket = -1;
+          let framesInCurrentSecond = 0;
+          let consecutiveNoTextCount = 0;
 
-                const cropBuffer = new Uint8ClampedArray(cropW * cropH * 4);
-                await copyVideoFrameRoiDirect(frame, cropX, cropY, cropW, cropH, cropBuffer, fallbackCanvas, fallbackCtx);
+          const fallbackCanvas = typeof OffscreenCanvas !== 'undefined'
+            ? new OffscreenCanvas(320, 160)
+            : document.createElement('canvas');
+          const fallbackCtx = fallbackCanvas.getContext('2d', { willReadFrequently: true }) as any;
+
+          const offscreenCanvas = typeof OffscreenCanvas !== 'undefined'
+            ? new OffscreenCanvas(1280, 720)
+            : document.createElement('canvas');
+          const offCtx = offscreenCanvas.getContext('2d', { willReadFrequently: true }) as any;
+
+          const pass2Decoder = new VideoDecoder({
+            output: async (frame: VideoFrame) => {
+              if (shouldCancel && shouldCancel()) {
                 frame.close();
-
-                applyThresholdingNoiseFilter(cropBuffer, cropW, cropH);
-                let diffScore = 0;
-                if (prevKfBuffer && prevKfBuffer.length === cropBuffer.length) {
-                  diffScore = computeFrameDiffScore(cropBuffer, prevKfBuffer, cropW, cropH);
-                }
-                prevKfBuffer = cropBuffer;
-
-                const presence = detectTextPresenceInFrame(cropBuffer, cropW, cropH);
-                keyframeInfoMap.set(Number(tSec.toFixed(2)), {
-                  hasText: presence.hasText,
-                  diffScore,
-                });
-
-                decodedKeyframeIdx++;
-              },
-              error: (err) => {
-                console.warn('Pass 1 Keyframe Decoder warning:', err);
-                pass1Resolve();
-              },
-            });
-
-            try {
-              try {
-                pass1Decoder.configure(decoderConfig);
-              } catch (_cfgErr) {
-                const altConfig = { ...decoderConfig };
-                delete (altConfig as any).description;
-                pass1Decoder.configure(altConfig);
+                return;
               }
-              for (const gop of gops) {
-                const sample = gop.keyframe;
-                const chunk = new EncodedVideoChunk({
-                  type: 'key',
-                  timestamp: (sample.cts * 1_000_000) / sample.timescale,
-                  duration: (sample.duration * 1_000_000) / sample.timescale,
-                  data: sample.data,
-                });
-                pass1Decoder.decode(chunk);
-              }
-              pass1Decoder.flush().then(() => pass1Resolve()).catch(() => pass1Resolve());
-            } catch (_err) {
-              pass1Resolve();
-            }
-          });
 
-          // Evaluate quiet GOPs
-          for (let i = 0; i < gops.length - 1; i++) {
-            const g1 = gops[i];
-            const g2 = gops[i + 1];
-            const info1 = keyframeInfoMap.get(Number(g1.startSec.toFixed(2)));
-            const info2 = keyframeInfoMap.get(Number(g2.startSec.toFixed(2)));
-
-            if (info1 && info2) {
-              const gopDuration = g2.startSec - g1.startSec;
-              // Safe threshold: If GOP is longer than 1.0 seconds, we never mark it silent.
-              // Long GOPs (commonly produced on static/black backgrounds) can contain nested subtitles
-              // that don't align with the boundary keyframes, so they must be fully decoded in Pass 2.
-              if (gopDuration <= 1.0) {
-                if (!info1.hasText && !info2.hasText && info2.diffScore < 3.0) {
-                  g1.isActive = false; // Mark silent GOP window without subtitles
-                }
-              }
-            }
-          }
-        }
-
-        const activeGops = gops.filter((g) => g.isActive);
-
-        // Pre-slice gop.deltas to only include frames up to the last target timestamp in each GOP
-        // This avoids decoding trailing frames in the GOP that are not needed.
-        const targetTimePoints: number[] = [];
-        for (let t = startT; t <= endT + 0.001; t += stepInterval) {
-          targetTimePoints.push(Number(t.toFixed(2)));
-        }
-
-        for (const gop of activeGops) {
-          const gopTargets = targetTimePoints.filter(t => t >= gop.startSec - 0.05 && t <= gop.endSec + 0.05);
-          if (gopTargets.length > 0) {
-            const maxTargetSec = Math.max(...gopTargets);
-            let maxNeededIdx = -1;
-            for (let idx = 0; idx < gop.deltas.length; idx++) {
-              const sTime = gop.deltas[idx].cts / gop.deltas[idx].timescale;
-              if (sTime <= maxTargetSec + 0.15) {
-                maxNeededIdx = idx;
-              }
-            }
-            gop.deltas = gop.deltas.slice(0, maxNeededIdx + 1);
-          } else {
-            // No target points in this GOP, empty its deltas so we only decode the keyframe!
-            gop.deltas = [];
-          }
-        }
-
-        if (onProgress) {
-          onProgress(
-            0,
-            100,
-            `⚡ [Pass 2/2] Bật hardware decoding song song trên ${activeGops.length}/${gops.length} vùng thoại active...`
-          );
-        }
-
-        // PASS 2: Parallel VideoDecoder Execution across active GOP chunks - Unlocked up to 16 parallel decoders for maximum CPU/GPU utilization
-        const logicalCores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
-        const maxParallel = Math.min(16, Math.max(2, logicalCores));
-        const numParallel = Math.min(maxParallel, Math.max(1, Math.ceil(activeGops.length / 3)));
-        const chunkSize = Math.ceil(activeGops.length / numParallel);
-
-        let globalCapturedCount = 0;
-        let globalDecodedCount = 0;
-        let lastProgressReportTime = 0;
-
-        const parallelPromises = Array.from({ length: numParallel }).map(async (_, pIdx) => {
-          const chunkGops = activeGops.slice(pIdx * chunkSize, (pIdx + 1) * chunkSize);
-          if (chunkGops.length === 0) return 0;
-
-          return new Promise<number>((pResolve) => {
-            let prevDiffPixelData: Uint8ClampedArray | null = null;
-            let lastEmittedTimestamp = -999;
-            let lastProcessedTimestamp = -999;
-            let workerCaptured = 0;
-            let currentSecondBucket = -1;
-            let framesInCurrentSecond = 0;
-            let consecutiveNoTextCount = 0;
-
-            const fallbackCanvas = typeof OffscreenCanvas !== 'undefined'
-              ? new OffscreenCanvas(320, 160)
-              : document.createElement('canvas');
-            const fallbackCtx = fallbackCanvas.getContext('2d', { willReadFrequently: true }) as any;
-
-            const offscreenCanvas = typeof OffscreenCanvas !== 'undefined'
-              ? new OffscreenCanvas(1280, 720)
-              : document.createElement('canvas');
-            const offCtx = offscreenCanvas.getContext('2d', { willReadFrequently: true }) as any;
-
-            const pass2Decoder = new VideoDecoder({
-              output: async (frame: VideoFrame) => {
-                if (shouldCancel && shouldCancel()) {
-                  frame.close();
-                  return;
-                }
-
-                const timestampSec = frame.timestamp / 1_000_000;
-                if (timestampSec < startT - 0.1 || timestampSec > endT + 0.1) {
-                  frame.close();
-                  return;
-                }
-
-                // Smooth Progress Update for silent/no-subtitle zones
-                globalDecodedCount++;
-                const nowMs = performance.now();
-                if (nowMs - lastProgressReportTime > 250) {
-                  lastProgressReportTime = nowMs;
-                  if (onProgress) {
-                    const duration = Math.max(0.1, endT - startT);
-                    const timeProgress = Math.min(1.0, Math.max(0.0, (timestampSec - startT) / duration));
-                    const pct = Math.round(timeProgress * 100);
-                    onProgress(
-                      globalCapturedCount,
-                      pct,
-                      `🚀 [WebCodecs Song Song] (${pct}% | ${timestampSec.toFixed(1)}s/${endT.toFixed(1)}s): Bóc ${globalCapturedCount} khung...`
-                    );
-                  }
-                }
-
-                // Optimization: Avoid heavy JS processing (pixel copy, filter, diff) for frames too close together
-                // A minimum gap of 0.12s (~8.3 fps) is optimal to prevent redundant crop+diff on dense consecutive candidate frames
-                if (timestampSec - lastProcessedTimestamp < 0.12) {
-                  frame.close();
-                  return;
-                }
-                lastProcessedTimestamp = timestampSec;
-
-                // Tầng 1: Hard Sampling Rate Ceiling (never emit faster than every 0.20s = max 5.0 fps)
-                if (timestampSec - lastEmittedTimestamp < 0.20) {
-                  frame.close();
-                  return;
-                }
-
-                // Tầng 3: Throttling Queue - Max 2 frames per video-second window for stable non-spike regions
-                const secBucket = Math.floor(timestampSec);
-                if (secBucket !== currentSecondBucket) {
-                  currentSecondBucket = secBucket;
-                  framesInCurrentSecond = 0;
-                }
-
-                const vW = frame.codedWidth || frame.displayWidth || 1280;
-                const vH = frame.codedHeight || frame.displayHeight || 720;
-
-                const cropX = Math.max(0, Math.floor((roi.x / 100) * vW));
-                const cropY = Math.max(0, Math.floor((roi.y / 100) * vH));
-                const cropW = Math.max(16, Math.floor((roi.width / 100) * vW));
-                const cropH = Math.max(16, Math.floor((roi.height / 100) * vH));
-
-                // Direct VideoFrame.copyTo() into Uint8ClampedArray (No canvas drawImage for diffing!)
-                const rawCropBuffer = new Uint8ClampedArray(cropW * cropH * 4);
-                await copyVideoFrameRoiDirect(frame, cropX, cropY, cropW, cropH, rawCropBuffer, fallbackCanvas, fallbackCtx);
-
-                applyThresholdingNoiseFilter(rawCropBuffer, cropW, cropH);
-                let diffScore = 0;
-                let isTransitionFrame = false;
-
-                if (prevDiffPixelData && prevDiffPixelData.length === rawCropBuffer.length) {
-                  diffScore = computeFrameDiffScore(rawCropBuffer, prevDiffPixelData, cropW, cropH);
-                  if (diffScore >= TRANSITION_DIFF_THRESHOLD) {
-                    isTransitionFrame = true;
-                  } else if (diffScore >= 2.0 && shouldOverrideFrameSkip(rawCropBuffer, cropW, cropH)) {
-                    isTransitionFrame = true;
-                  }
-                }
-                prevDiffPixelData = rawCropBuffer;
-
-                // Adaptive Sampling: Expand sampling interval up to 1.75x when in prolonged quiet / non-text scenes
-                const effectiveStepInterval = (options.adaptiveSampling !== false && consecutiveNoTextCount >= 3)
-                  ? Math.min(1.6, stepInterval * 1.75)
-                  : stepInterval;
-
-                const isIntervalElapsed = (timestampSec - lastEmittedTimestamp) >= (effectiveStepInterval - 0.05);
-
-                // Skip non-transition and non-elapsed interval frames immediately!
-                if (!isTransitionFrame && !isIntervalElapsed) {
-                  frame.close();
-                  return;
-                }
-
-                // Throttling Check: If already captured 2 frames in this video-second, throttle non-critical frames unless strong transition
-                if (framesInCurrentSecond >= 2 && diffScore < 6.0) {
-                  frame.close();
-                  return;
-                }
-
-                // Full-res capture rendering for frames being emitted
-                const scale = Math.min(1.0, 720 / Math.max(cropW, cropH));
-                const targetW = Math.round(cropW * scale);
-                const targetH = Math.round(cropH * scale);
-
-                if (offscreenCanvas.width !== targetW || offscreenCanvas.height !== targetH) {
-                  offscreenCanvas.width = targetW;
-                  offscreenCanvas.height = targetH;
-                }
-
-                offCtx.drawImage(frame, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
+              const timestampSec = frame.timestamp / 1_000_000;
+              if (timestampSec < startT - 0.1 || timestampSec > endT + 0.1) {
                 frame.close();
+                return;
+              }
 
-                if (bgFilterMode !== 'none' && bgFilterStrength > 0) {
-                  applyBackgroundFilter(offCtx, targetW, targetH, bgFilterMode, bgFilterStrength);
-                }
-
-                const imgData = offCtx.getImageData(0, 0, targetW, targetH);
-                const currPixelData = imgData.data;
-
-                lastEmittedTimestamp = timestampSec;
-                framesInCurrentSecond++;
-
-                const { hasText } = detectTextPresenceInFrame(currPixelData, targetW, targetH);
-                
-                // Track quiet streak for adaptive interval expansion
-                if (hasText || isTransitionFrame) {
-                  consecutiveNoTextCount = 0;
-                } else {
-                  consecutiveNoTextCount++;
-                }
-
-                // Optimization: Skip computing Laplacian variance since sharpnessScore is completely unused in the app
-                const sharpnessScore = 0;
-
-                let finalCanvas: HTMLCanvasElement | undefined = undefined;
-                if (!isLocalPaddle) {
-                  finalCanvas = document.createElement('canvas');
-                  finalCanvas.width = targetW;
-                  finalCanvas.height = targetH;
-                  const fCtx = finalCanvas.getContext('2d', { willReadFrequently: true });
-                  if (fCtx) {
-                    fCtx.putImageData(imgData, 0, 0);
-                  }
-                }
-
-                workerCaptured++;
-                globalCapturedCount++;
-
+              // Smooth Progress Update for silent/no-subtitle zones
+              globalDecodedCount++;
+              const nowMs = performance.now();
+              if (nowMs - lastProgressReportTime > 250) {
+                lastProgressReportTime = nowMs;
                 if (onProgress) {
                   const duration = Math.max(0.1, endT - startT);
                   const timeProgress = Math.min(1.0, Math.max(0.0, (timestampSec - startT) / duration));
@@ -570,76 +500,195 @@ export async function extractFramesTrueWebCodecs(options: FrameExtractorOptions)
                     `🚀 [WebCodecs Song Song] (${pct}% | ${timestampSec.toFixed(1)}s/${endT.toFixed(1)}s): Bóc ${globalCapturedCount} khung...`
                   );
                 }
-
-                onFrameCaptured({
-                  canvas: finalCanvas,
-                  pixelData: currPixelData,
-                  width: targetW,
-                  height: targetH,
-                  timestamp: timestampSec,
-                  hasText,
-                  frameDiffScore: diffScore,
-                  isTransitionFrame,
-                  sharpnessScore,
-                });
-              },
-              error: (err) => {
-                console.warn('Pass 2 Parallel Decoder error:', err);
-                pResolve(workerCaptured);
-              },
-            });
-
-            try {
-              try {
-                pass2Decoder.configure(decoderConfig);
-              } catch (_cfgErr) {
-                const altConfig = { ...decoderConfig };
-                delete (altConfig as any).description;
-                pass2Decoder.configure(altConfig);
               }
 
-              for (const gop of chunkGops) {
-                if (shouldCancel && shouldCancel()) break;
+              // Optimization: Avoid heavy JS processing (pixel copy, filter, diff) for frames too close together
+              // A minimum gap of 0.12s (~8.3 fps) is optimal to prevent redundant crop+diff on dense consecutive candidate frames
+              if (timestampSec - lastProcessedTimestamp < 0.12) {
+                frame.close();
+                return;
+              }
+              lastProcessedTimestamp = timestampSec;
 
-                // Keyframe
-                const kSample = gop.keyframe;
-                pass2Decoder.decode(new EncodedVideoChunk({
-                  type: 'key',
-                  timestamp: (kSample.cts * 1_000_000) / kSample.timescale,
-                  duration: (kSample.duration * 1_000_000) / kSample.timescale,
-                  data: kSample.data,
-                }));
+              // Tầng 1: Hard Sampling Rate Ceiling (never emit faster than every 0.20s = max 5.0 fps)
+              if (timestampSec - lastEmittedTimestamp < 0.20) {
+                frame.close();
+                return;
+              }
 
-                // Delta frames
-                for (const dSample of gop.deltas) {
-                  if (shouldCancel && shouldCancel()) break;
-                  pass2Decoder.decode(new EncodedVideoChunk({
-                    type: 'delta',
-                    timestamp: (dSample.cts * 1_000_000) / dSample.timescale,
-                    duration: (dSample.duration * 1_000_000) / dSample.timescale,
-                    data: dSample.data,
-                  }));
+              // Tầng 3: Throttling Queue - Max 2 frames per video-second window for stable non-spike regions
+              const secBucket = Math.floor(timestampSec);
+              if (secBucket !== currentSecondBucket) {
+                currentSecondBucket = secBucket;
+                framesInCurrentSecond = 0;
+              }
+
+              const vW = frame.codedWidth || frame.displayWidth || 1280;
+              const vH = frame.codedHeight || frame.displayHeight || 720;
+
+              const cropX = Math.max(0, Math.floor((roi.x / 100) * vW));
+              const cropY = Math.max(0, Math.floor((roi.y / 100) * vH));
+              const cropW = Math.max(16, Math.floor((roi.width / 100) * vW));
+              const cropH = Math.max(16, Math.floor((roi.height / 100) * vH));
+
+              // Direct VideoFrame.copyTo() into Uint8ClampedArray (No canvas drawImage for diffing!)
+              const rawCropBuffer = new Uint8ClampedArray(cropW * cropH * 4);
+              await copyVideoFrameRoiDirect(frame, cropX, cropY, cropW, cropH, rawCropBuffer, fallbackCanvas, fallbackCtx);
+
+              applyThresholdingNoiseFilter(rawCropBuffer, cropW, cropH);
+              let diffScore = 0;
+              let isTransitionFrame = false;
+
+              if (prevDiffPixelData && prevDiffPixelData.length === rawCropBuffer.length) {
+                diffScore = computeFrameDiffScore(rawCropBuffer, prevDiffPixelData, cropW, cropH);
+                if (diffScore >= TRANSITION_DIFF_THRESHOLD) {
+                  isTransitionFrame = true;
+                } else if (diffScore >= 2.0 && shouldOverrideFrameSkip(rawCropBuffer, cropW, cropH)) {
+                  isTransitionFrame = true;
+                }
+              }
+              prevDiffPixelData = rawCropBuffer;
+
+              // Adaptive Sampling: Expand sampling interval up to 1.75x when in prolonged quiet / non-text scenes
+              const effectiveStepInterval = (options.adaptiveSampling !== false && consecutiveNoTextCount >= 3)
+                ? Math.min(1.6, stepInterval * 1.75)
+                : stepInterval;
+
+              const isIntervalElapsed = (timestampSec - lastEmittedTimestamp) >= (effectiveStepInterval - 0.05);
+
+              // Skip non-transition and non-elapsed interval frames immediately!
+              if (!isTransitionFrame && !isIntervalElapsed) {
+                frame.close();
+                return;
+              }
+
+              // Throttling Check: If already captured 2 frames in this video-second, throttle non-critical frames unless strong transition
+              if (framesInCurrentSecond >= 2 && diffScore < 6.0) {
+                frame.close();
+                return;
+              }
+
+              // Full-res capture rendering for frames being emitted
+              const scale = Math.min(1.0, 720 / Math.max(cropW, cropH));
+              const targetW = Math.round(cropW * scale);
+              const targetH = Math.round(cropH * scale);
+
+              if (offscreenCanvas.width !== targetW || offscreenCanvas.height !== targetH) {
+                offscreenCanvas.width = targetW;
+                offscreenCanvas.height = targetH;
+              }
+
+              offCtx.drawImage(frame, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
+              frame.close();
+
+              if (bgFilterMode !== 'none' && bgFilterStrength > 0) {
+                applyBackgroundFilter(offCtx, targetW, targetH, bgFilterMode, bgFilterStrength);
+              }
+
+              const imgData = offCtx.getImageData(0, 0, targetW, targetH);
+              const currPixelData = imgData.data;
+
+              lastEmittedTimestamp = timestampSec;
+              framesInCurrentSecond++;
+
+              const { hasText } = detectTextPresenceInFrame(currPixelData, targetW, targetH);
+              
+              // Track quiet streak for adaptive interval expansion
+              if (hasText || isTransitionFrame) {
+                consecutiveNoTextCount = 0;
+              } else {
+                consecutiveNoTextCount++;
+              }
+
+              // Sharpness score placeholder
+              const sharpnessScore = 0;
+
+              let finalCanvas: HTMLCanvasElement | undefined = undefined;
+              if (!isLocalPaddle) {
+                finalCanvas = document.createElement('canvas');
+                finalCanvas.width = targetW;
+                finalCanvas.height = targetH;
+                const fCtx = finalCanvas.getContext('2d', { willReadFrequently: true });
+                if (fCtx) {
+                  fCtx.putImageData(imgData, 0, 0);
                 }
               }
 
-              pass2Decoder.flush().then(() => pResolve(workerCaptured)).catch(() => pResolve(workerCaptured));
-            } catch (err) {
-              console.warn('Pass 2 configure/decode error:', err);
+              workerCaptured++;
+              globalCapturedCount++;
+
+              if (onProgress) {
+                const duration = Math.max(0.1, endT - startT);
+                const timeProgress = Math.min(1.0, Math.max(0.0, (timestampSec - startT) / duration));
+                const pct = Math.round(timeProgress * 100);
+                onProgress(
+                  globalCapturedCount,
+                  pct,
+                  `🚀 [WebCodecs Song Song] (${pct}% | ${timestampSec.toFixed(1)}s/${endT.toFixed(1)}s): Bóc ${globalCapturedCount} khung...`
+                );
+              }
+
+              onFrameCaptured({
+                canvas: finalCanvas,
+                pixelData: currPixelData,
+                width: targetW,
+                height: targetH,
+                timestamp: timestampSec,
+                hasText,
+                frameDiffScore: diffScore,
+                isTransitionFrame,
+                sharpnessScore,
+              });
+            },
+            error: (err) => {
+              console.warn('Pass 2 Parallel Decoder error:', err?.message || err);
               pResolve(workerCaptured);
-            }
+            },
           });
+
+          try {
+            try {
+              pass2Decoder.configure(decoderConfig);
+            } catch (_cfgErr) {
+              const altConfig = { ...decoderConfig };
+              delete (altConfig as any).description;
+              pass2Decoder.configure(altConfig);
+            }
+
+            for (const gop of chunkGops) {
+              if (shouldCancel && shouldCancel()) break;
+
+              // Keyframe
+              const kSample = gop.keyframe;
+              pass2Decoder.decode(new EncodedVideoChunk({
+                type: 'key',
+                timestamp: (kSample.cts * 1_000_000) / kSample.timescale,
+                duration: (kSample.duration * 1_000_000) / kSample.timescale,
+                data: kSample.data,
+              }));
+
+              // Delta frames
+              for (const dSample of gop.deltas) {
+                if (shouldCancel && shouldCancel()) break;
+                pass2Decoder.decode(new EncodedVideoChunk({
+                  type: 'delta',
+                  timestamp: (dSample.cts * 1_000_000) / dSample.timescale,
+                  duration: (dSample.duration * 1_000_000) / dSample.timescale,
+                  data: dSample.data,
+                }));
+              }
+            }
+
+            pass2Decoder.flush().then(() => pResolve(workerCaptured)).catch(() => pResolve(workerCaptured));
+          } catch (err) {
+            console.warn('Pass 2 configure/decode error:', err);
+            pResolve(workerCaptured);
+          }
         });
+      });
 
-        await Promise.all(parallelPromises);
-        resolve(globalCapturedCount);
-      };
-
-      mp4File.onError = (e: any) => reject(e);
-
-      (arrayBuffer as any).fileStart = 0;
-      mp4File.appendBuffer(arrayBuffer);
-      mp4File.flush();
-      processAllSamples(allSamples).catch(reject);
+      await Promise.all(parallelPromises);
+      resolve(globalCapturedCount);
     } catch (err) {
       reject(err);
     }
@@ -1404,8 +1453,9 @@ export async function extractFramesWithWebCodecs(options: FrameExtractorOptions)
         console.log(`✅ WebCodecs VideoDecoder decoded ${count} frames successfully with frame-diffing.`);
         return count;
       }
-    } catch (webcodecsErr) {
-      console.warn('WebCodecs VideoDecoder failed or skipped, falling back to Parallel 16x Stream:', webcodecsErr);
+    } catch (webcodecsErr: any) {
+      const errMsg = webcodecsErr?.message || (typeof webcodecsErr === 'string' ? webcodecsErr : (webcodecsErr && Object.keys(webcodecsErr).length > 0 ? JSON.stringify(webcodecsErr) : 'VideoDecoder initialization or container parsing error'));
+      console.warn(`[WebCodecs Extractor] VideoDecoder notice: ${errMsg}. Seamlessly switching to Parallel 16x Stream fallback.`);
     }
   }
 

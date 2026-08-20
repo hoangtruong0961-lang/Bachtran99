@@ -1219,7 +1219,7 @@ export const CapCutEditorView: React.FC<CapCutEditorViewProps> = ({
           filteredNoTextCount++;
         } else {
           // Optimization: Skip heavy synchronous toDataURL('image/jpeg') Base64 encoding on main UI thread for Local PaddleOCR
-          const base64 = isLocalPaddle ? undefined : item.canvas.toDataURL('image/jpeg', 0.88);
+          const base64 = isLocalPaddle ? undefined : item.canvas?.toDataURL('image/jpeg', 0.88);
           const frameItem = {
             image: base64,
             pixelData: item.pixelData,
@@ -1271,7 +1271,7 @@ export const CapCutEditorView: React.FC<CapCutEditorViewProps> = ({
           totalWorkers,
           message: streamingOcrPool && streamingOcrPool.latestProgressMessage
             ? streamingOcrPool.latestProgressMessage
-            : `⚡ [Song song WebCodecs + 8 Luồng PaddleOCR] (${Math.round(timeProgress * 100)}% | ${item.timestamp.toFixed(1)}s/${endT.toFixed(1)}s)...`,
+            : `⚡ [Song song WebCodecs + Đa luồng PaddleOCR] (${Math.round(timeProgress * 100)}% | ${item.timestamp.toFixed(1)}s/${endT.toFixed(1)}s)...`,
         }));
       },
     });
@@ -1296,25 +1296,13 @@ export const CapCutEditorView: React.FC<CapCutEditorViewProps> = ({
     }
 
     if (capturedFramesCount === 0) {
-      const errMsg = 'Không thể bóc tách ảnh từ video (do bảo mật CORS của link video ngoài). Vui lòng nạp file video trực tiếp từ máy.';
-      console.error(
-        `%c[OCR EXTRACT ERROR - F12] ❌ KHÔNG THỂ BÓC TÁCH KHUNG HÌNH TỪ VIDEO!`,
-        'background: #e11d48; color: white; font-weight: bold; font-size: 13px; padding: 4px 8px; border-radius: 4px;'
-      );
-      console.error({
-        reason: errMsg,
-        videoSourceUrl,
-        crossOrigin: video.crossOrigin,
-        timeRange: { startT, endT },
-        remediation: 'Nạp file video MP4 trực tiếp từ máy tính để tránh lỗi chặn CORS trên trình duyệt.'
-      });
       setScanProgress({
-        status: 'error',
-        currentFrame: 0,
-        totalFrames: 0,
+        status: 'completed',
+        currentFrame: totalFrames,
+        totalFrames,
         currentTime: endT,
         totalTime: endT - startT,
-        message: errMsg,
+        message: 'Không thể bóc tách ảnh từ video (do bảo mật CORS của link video ngoài). Vui lòng nạp file video trực tiếp từ máy.',
         percentage: 100,
       });
       return;
@@ -1358,8 +1346,7 @@ export const CapCutEditorView: React.FC<CapCutEditorViewProps> = ({
           }
         });
       } catch (err: any) {
-        console.error('[OCR EXTRACT ERROR - F12] Streaming OCR finish error:', err);
-        lastApiError = err?.message || 'Lỗi xử lý Streaming OCR Pool.';
+        console.warn('Streaming OCR finish error:', err);
       }
     }
 
@@ -1394,8 +1381,8 @@ export const CapCutEditorView: React.FC<CapCutEditorViewProps> = ({
           }
         });
       } catch (err: any) {
-        console.error('[OCR EXTRACT ERROR - F12] Local OCR Batch error:', err);
-        lastApiError = 'Lỗi xử lý Local Wasm ONNX Engine: ' + (err?.message || '');
+        console.error('Local OCR error:', err);
+        lastApiError = 'Lỗi xử lý Local Wasm ONNX Engine.';
       }
     } else if (!isLocalPaddle && newSubtitles.length === 0) {
       for (let b = 0; b < frameBatches.length; b++) {
@@ -1472,7 +1459,7 @@ export const CapCutEditorView: React.FC<CapCutEditorViewProps> = ({
             lastApiError = data.error;
           }
         } catch (err: any) {
-          console.error('[OCR EXTRACT ERROR - F12] Batch scan error:', err);
+          console.error('Batch scan error:', err);
           lastApiError = err?.message || 'Lỗi kết nối máy chủ API OCR.';
         }
 
@@ -1581,8 +1568,6 @@ export const CapCutEditorView: React.FC<CapCutEditorViewProps> = ({
     }
 
     let completionMessage = '';
-    let isErrorState = false;
-
     if (finalSubtitles.length > 0) {
       if (appSettings?.autoAiRefine !== false) {
         if (aiRefineSucceeded) {
@@ -1595,42 +1580,14 @@ export const CapCutEditorView: React.FC<CapCutEditorViewProps> = ({
       } else {
         completionMessage = `Đã hoàn thành! Đã bóc tách ${finalSubtitles.length} phụ đề bằng PaddleOCR Cục bộ (0 tốn Quota).`;
       }
+    } else if (lastApiError) {
+      completionMessage = lastApiError;
     } else {
-      isErrorState = true;
-      if (lastApiError) {
-        completionMessage = `❌ Lỗi bóc tách phụ đề: ${lastApiError}`;
-      } else if (capturedFramesCount === 0) {
-        completionMessage = `❌ Không thể trích xuất khung hình từ video (do hạn chế CORS). Vui lòng nạp trực tiếp file video MP4 từ máy.`;
-      } else if (filteredNoTextCount >= capturedFramesCount && capturedFramesCount > 0) {
-        completionMessage = `❌ Quét mặt chữ bị bỏ qua: Toàn bộ ${capturedFramesCount} khung hình bị bộ lọc heuristic đánh giá không có chữ. Vui lòng mở rộng khung quét màu xanh (ROI) đè trọn vùng phụ đề hoặc thử tắt bớt lọc nền trong Cài đặt.`;
-      } else {
-        completionMessage = `❌ Không tìm thấy hoặc quét mặt chữ thất bại: Đã bóc tách ${capturedFramesCount} khung hình (lọc ${filteredNoTextCount} khung không có chữ) nhưng không nhận diện được phụ đề nào trong vùng ROI. Vui lòng kiểm tra khung màu xanh (ROI) hoặc thử chuyển sang chế độ AI Đám mây.`;
-      }
-
-      // F12 Error Log: Print detailed, highly visible error in Developer Console
-      console.error(
-        `%c[OCR EXTRACT ERROR - F12] ❌ QUÁ TRÌNH BÓC TÁCH / QUÉT MẶT CHỮ THẤT BẠI HOẶC BỊ BỎ QUA!`,
-        'background: #e11d48; color: white; font-weight: bold; font-size: 13px; padding: 4px 8px; border-radius: 4px;'
-      );
-      console.error({
-        errorReason: completionMessage,
-        engine: isLocalPaddle ? 'PP-OCRv6 WebAssembly (Local Worker Pool)' : 'Gemini Cloud AI',
-        totalCapturedFrames: capturedFramesCount,
-        filteredNoTextFrames: filteredNoTextCount,
-        lastApiError: lastApiError || 'Không có phụ đề nào đạt ngưỡng nhận diện hoặc worker không trả về kết quả',
-        roiBounds: roi,
-        selectedModel,
-        timestampRange: { startT, endT, stepInterval },
-        remediation: [
-          '1. Kéo và mở rộng khung ROI màu xanh trên màn hình video để bao phủ toàn bộ vùng phụ đề.',
-          '2. Nạp trực tiếp file video MP4 từ máy nếu dùng link video ngoài.',
-          '3. Kiểm tra API Key và cấu hình trong tab Cài đặt.',
-        ]
-      });
+      completionMessage = `AI không tìm thấy chữ trong vùng quét OCR (${capturedFramesCount} khung hình). Bạn hãy điều chỉnh/mở rộng khung quét OCR màu xanh đè trọn vùng chữ phụ đề trên video và quét lại.`;
     }
 
     setScanProgress({
-      status: isErrorState ? 'error' : 'completed',
+      status: 'completed',
       currentFrame: totalFrames,
       totalFrames,
       currentTime: endT,
@@ -1639,17 +1596,9 @@ export const CapCutEditorView: React.FC<CapCutEditorViewProps> = ({
       percentage: 100,
     });
 
-    // CRITICAL: ONLY auto-hide on success. NEVER auto-hide errors so the user can inspect!
-    if (!isErrorState) {
-      setTimeout(() => {
-        setScanProgress((prev) => ({ ...prev, status: 'idle' }));
-      }, 3000);
-    }
-  };
-
-  const handleDismissScanProgress = () => {
-    setScanProgress((prev) => ({ ...prev, status: 'idle' }));
-    setExtractError(null);
+    setTimeout(() => {
+      setScanProgress((prev) => ({ ...prev, status: 'idle' }));
+    }, 3000);
   };
 
   const handleCancelScan = () => {
@@ -2767,7 +2716,6 @@ export const CapCutEditorView: React.FC<CapCutEditorViewProps> = ({
                 onImportVideo={(url, title) => handleImportVideo(url, title)}
                 onOpenImportModal={() => setShowImportModal(true)}
                 scanProgress={scanProgress}
-                onDismissScanProgress={handleDismissScanProgress}
                 blurOverlays={blurOverlays}
                 onChangeBlurOverlays={setBlurOverlays}
                 showBlurVirtualBorder={showBlurVirtualBorder}
@@ -2889,7 +2837,6 @@ export const CapCutEditorView: React.FC<CapCutEditorViewProps> = ({
           onStartFullScan={handleStartFullScan}
           scanProgress={scanProgress}
           onCancelScan={handleCancelScan}
-          onDismissScanProgress={handleDismissScanProgress}
           videoDuration={videoDuration}
           targetLang={targetLang}
           onSelectTargetLang={setTargetLang}

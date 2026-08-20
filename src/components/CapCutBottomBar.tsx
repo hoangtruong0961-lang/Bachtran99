@@ -71,7 +71,6 @@ interface CapCutBottomBarProps {
   onStartFullScan: (startTime: number, endTime: number, interval: number, customContext: string) => void;
   scanProgress: OCRScanProgress;
   onCancelScan: () => void;
-  onDismissScanProgress?: () => void;
   videoDuration: number;
   // Translate actions
   targetLang: string;
@@ -139,7 +138,6 @@ export const CapCutBottomBar: React.FC<CapCutBottomBarProps> = ({
   onStartFullScan,
   scanProgress,
   onCancelScan,
-  onDismissScanProgress,
   videoDuration,
   targetLang,
   onSelectTargetLang,
@@ -708,28 +706,6 @@ export const CapCutBottomBar: React.FC<CapCutBottomBarProps> = ({
                       <X className="w-4 h-4" />
                     </button>
                   </div>
-
-                  {/* Persistent Error Alert if OCR Extraction Failed or Skipped */}
-                  {scanProgress.status === 'error' && (
-                    <div className="bg-rose-950/70 border border-rose-500/70 p-3 rounded-xl space-y-2 animate-in fade-in">
-                      <div className="flex items-start gap-2">
-                        <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5 animate-pulse" />
-                        <div className="space-y-1">
-                          <p className="text-xs text-rose-300 font-bold">Lỗi quét mặt chữ OCR</p>
-                          <p className="text-[11px] text-slate-200 leading-snug">{scanProgress.message}</p>
-                          <p className="text-[10px] text-slate-400 font-mono">Xem chi tiết trên F12 Console.</p>
-                        </div>
-                      </div>
-                      {onDismissScanProgress && (
-                        <button
-                          onClick={onDismissScanProgress}
-                          className="w-full py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold transition shadow"
-                        >
-                          Đóng thông báo lỗi
-                        </button>
-                      )}
-                    </div>
-                  )}
 
                   {isScanning ? (
                     <div className="bg-slate-900 border border-sky-500/30 p-3 rounded-xl space-y-2.5">

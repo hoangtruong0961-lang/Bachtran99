@@ -533,10 +533,8 @@ export async function runClientSideLocalOcrBatch(
   const framesToProcess = frames;
   const skippedBatchCount = 0;
 
-  // Determine optimal worker pool size: unlock up to 12 parallel Web Workers based on CPU logical cores
-  const logicalCores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
-  const calculatedCores = logicalCores >= 8 ? logicalCores - 1 : logicalCores;
-  const maxPoolSize = Math.min(12, Math.max(2, calculatedCores));
+  // Determine optimal worker pool size based on device environment and core count
+  const maxPoolSize = getOptimalOcrWorkerPoolSize();
   // If frame count is small (e.g. < 4), use fewer workers; otherwise use full pool size
   const poolSize = Math.min(maxPoolSize, Math.max(1, Math.ceil(framesToProcess.length / 2)));
 
@@ -816,13 +814,28 @@ export interface PersistentWorker {
 // Global cache for initialized warm workers to prevent re-initializing ONNX sessions between scans
 const globalWarmWorkers: PersistentWorker[] = [];
 
+export function getOptimalOcrWorkerPoolSize(): number {
+  if (typeof navigator === 'undefined') return 2;
+  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent || '');
+  const lowMem = (navigator as any).deviceMemory && (navigator as any).deviceMemory <= 4;
+  const logicalCores = navigator.hardwareConcurrency || 4;
+
+  if (isMobile || lowMem) {
+    // Mobile browsers have strict WebAssembly memory ceilings (~512MB-1GB total per page tab).
+    // 1-2 workers is ideal to prevent "WebAssembly.Memory(): could not allocate memory" RangeError
+    return Math.min(2, Math.max(1, logicalCores >= 4 ? 2 : 1));
+  }
+  // Desktop environment: 2-4 workers provides high throughput without WASM memory thrashing
+  return Math.min(4, Math.max(2, Math.floor(logicalCores / 2)));
+}
+
 /**
  * Real-time Streaming Worker Pool for ONNX WASM PaddleOCR execution.
  * Allows video decoding and Web Worker OCR to run concurrently in parallel pipelines,
  * reducing total subtitle extraction waiting time by ~50%.
  */
 export class StreamingOcrPool {
-  private poolSize: number = 4;
+  private poolSize: number = 2;
   private workers: PersistentWorker[] = [];
   private frameQueue: LocalFrameItem[] = [];
   private detectedItems: { text: string; timestamp: number; confidence?: number }[] = [];
@@ -869,10 +882,7 @@ export class StreamingOcrPool {
     this.targetLang = options?.targetLang ?? 'Tiếng Việt';
     this.onProgress = options?.onProgress;
 
-    const logicalCores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
-    // Unlocked CPU cores: scale up to 12 parallel Web Workers (8 cores -> 7 workers, 12-16 cores -> max 12 workers)
-    const calculatedCores = logicalCores >= 8 ? logicalCores - 1 : logicalCores;
-    this.poolSize = Math.min(12, Math.max(2, calculatedCores));
+    this.poolSize = getOptimalOcrWorkerPoolSize();
   }
 
   private handleWorkerMessage(entry: PersistentWorker, e: MessageEvent) {
@@ -1026,44 +1036,68 @@ export class StreamingOcrPool {
     // Bind event handlers and track reused workers
     workersToUse.forEach((entry) => {
       this.workers.push(entry);
-      const p = new Promise<boolean>((resolve) => {
-        entry.worker.onmessage = (e: MessageEvent) => {
-          this.handleWorkerMessage(entry, e);
-        };
-        // Reused workers are already fully initialized
-        resolve(true);
-      });
-      initPromises.push(p);
+      entry.worker.onmessage = (e: MessageEvent) => {
+        this.handleWorkerMessage(entry, e);
+      };
     });
 
-    // Create new workers for the remaining slots
+    // Create new workers for the remaining slots sequentially to avoid WASM memory allocation spikes
     const needed = this.poolSize - reusedCount;
     for (let i = 0; i < needed; i++) {
       const workerId = reusedCount + i + 1;
-      const p = new Promise<boolean>((resolve) => {
-        try {
-          const worker = new Worker(new URL('../workers/ocr.worker.ts', import.meta.url), { type: 'module' });
-          const entry: PersistentWorker = { id: workerId, worker, isBusy: false, inFlightCount: 0, currentBatchTimestamps: undefined };
-          this.workers.push(entry);
+      const success = await new Promise<boolean>((resolve) => {
+        let isResolved = false;
+        let worker: Worker | null = null;
+        let timer: any = null;
 
-          worker.onmessage = (e: MessageEvent) => {
+        const cleanup = (ok: boolean) => {
+          if (isResolved) return;
+          isResolved = true;
+          if (timer) clearTimeout(timer);
+          resolve(ok);
+        };
+
+        timer = setTimeout(() => {
+          console.warn(`[Streaming OCR Pool Worker #${workerId}] init timed out, skipping slot`);
+          if (worker) {
+            try { worker.terminate(); } catch {}
+          }
+          cleanup(false);
+        }, 15000);
+
+        try {
+          worker = new Worker(new URL('../workers/ocr.worker.ts', import.meta.url), { type: 'module' });
+          const currentWorker = worker;
+          const entry: PersistentWorker = { id: workerId, worker: currentWorker, isBusy: false, inFlightCount: 0, currentBatchTimestamps: undefined };
+
+          currentWorker.onmessage = (e: MessageEvent) => {
             const { type } = e.data;
             if (type === 'READY') {
-              // Switch to dynamic message handler once initialized
-              worker.onmessage = (ev: MessageEvent) => {
+              this.workers.push(entry);
+              currentWorker.onmessage = (ev: MessageEvent) => {
                 this.handleWorkerMessage(entry, ev);
               };
-              resolve(true);
+              cleanup(true);
+            } else if (type === 'ERROR') {
+              console.warn(`[Streaming OCR Pool Worker #${workerId}] reported init error:`, e.data.error);
+              try { currentWorker.terminate(); } catch {}
+              cleanup(false);
             } else {
               this.handleWorkerMessage(entry, e);
             }
+          };
+
+          currentWorker.onerror = (errEvent) => {
+            console.warn(`[Streaming OCR Pool Worker #${workerId}] worker error event:`, errEvent);
+            try { currentWorker.terminate(); } catch {}
+            cleanup(false);
           };
 
           const detCopy = detBuf ? detBuf.slice(0) : undefined;
           const recCopy = recBuf ? recBuf.slice(0) : undefined;
           const dictCopy = cleanDictBuf ? cleanDictBuf.slice(0) : undefined;
 
-          worker.postMessage({
+          currentWorker.postMessage({
             type: 'INIT',
             workerId,
             detBuffer: detCopy,
@@ -1071,14 +1105,24 @@ export class StreamingOcrPool {
             dictBuffer: dictCopy,
           });
         } catch (err) {
-          console.warn(`[Streaming OCR Pool Worker #${workerId}] init error:`, err);
-          resolve(false);
+          console.warn(`[Streaming OCR Pool Worker #${workerId}] instantiation error:`, err);
+          cleanup(false);
         }
       });
-      initPromises.push(p);
+
+      // If a worker failed due to device memory ceiling, stop trying to spawn more workers
+      if (!success && this.workers.length > 0) {
+        console.log(`[Streaming OCR Pool] Proceeding with ${this.workers.length} active worker(s).`);
+        break;
+      }
     }
 
-    await Promise.all(initPromises);
+    if (this.workers.length === 0) {
+      console.error('[Streaming OCR Pool] All Web Workers failed to initialize.');
+      return false;
+    }
+
+    this.poolSize = this.workers.length;
     this.isInitDone = true;
     this.dispatchNextBatch();
     return true;
