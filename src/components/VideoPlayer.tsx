@@ -41,6 +41,7 @@ interface VideoPlayerProps {
   onOpenImportModal?: () => void;
   showRoiBox?: boolean;
   scanProgress?: OCRScanProgress;
+  onDismissScanProgress?: () => void;
   blurOverlays?: BlurOverlay[];
   onChangeBlurOverlays?: (overlays: BlurOverlay[]) => void;
   showBlurVirtualBorder?: boolean;
@@ -76,6 +77,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onOpenImportModal,
   showRoiBox = false,
   scanProgress,
+  onDismissScanProgress,
   blurOverlays = [],
   onChangeBlurOverlays,
   showBlurVirtualBorder = true,
@@ -1526,6 +1528,47 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                     )}
                   </div>
                 </div>
+              </div>
+            </div>
+          </div>
+        )}
+        {/* Persistent Error Overlay Modal when OCR/Extract fails or is skipped */}
+        {scanProgress && scanProgress.status === 'error' && (
+          <div className="absolute inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex flex-col items-center justify-center p-6 text-white select-none pointer-events-auto">
+            <div className="bg-slate-900 border-2 border-rose-500/70 rounded-2xl p-5 max-w-lg w-full shadow-[0_0_30px_rgba(244,63,94,0.3)] space-y-4 text-center animate-in fade-in zoom-in-95 duration-200">
+              <div className="w-12 h-12 rounded-full bg-rose-500/20 border border-rose-500/40 flex items-center justify-center mx-auto text-rose-400">
+                <AlertTriangle className="w-6 h-6 animate-pulse" />
+              </div>
+              
+              <div className="space-y-1.5">
+                <h3 className="text-sm font-black tracking-wide text-rose-300 uppercase">
+                  Cảnh báo: Quét mặt chữ (OCR) Thất bại / Bị bỏ qua
+                </h3>
+                <p className="text-xs text-slate-200 font-medium leading-relaxed bg-rose-950/40 border border-rose-900/50 rounded-xl p-3 text-left">
+                  {scanProgress.message}
+                </p>
+              </div>
+
+              <div className="bg-slate-950/80 rounded-lg p-2.5 text-[11px] text-slate-400 text-left space-y-1 font-mono border border-slate-800">
+                <div className="flex items-center gap-1.5 text-amber-400 font-semibold">
+                  <span>💡 Gợi ý kiểm tra:</span>
+                </div>
+                <ul className="list-disc pl-4 space-y-0.5 text-[10px] text-slate-300">
+                  <li>Mở <b>F12 (Console)</b> để xem chi tiết log lỗi bóc tách và stack trace.</li>
+                  <li>Kéo chỉnh lại khung quét màu xanh (ROI) đè trọn vùng phụ đề.</li>
+                  <li>Nếu video link ngoài bị chặn CORS, hãy nạp file video trực tiếp từ máy tính.</li>
+                </ul>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                {onDismissScanProgress && (
+                  <button
+                    onClick={onDismissScanProgress}
+                    className="w-full py-2.5 px-4 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded-xl shadow-lg transition flex items-center justify-center gap-1.5"
+                  >
+                    <span>Đóng thông báo lỗi</span>
+                  </button>
+                )}
               </div>
             </div>
           </div>

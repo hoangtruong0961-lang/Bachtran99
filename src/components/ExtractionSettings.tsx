@@ -21,6 +21,7 @@ interface ExtractionSettingsProps {
   onStartFullScan: (startTime: number, endTime: number, interval: number, customContext: string) => void;
   scanProgress: OCRScanProgress;
   onCancelScan: () => void;
+  onDismissScanProgress?: () => void;
   subtitleCount: number;
   appSettings?: AppSettings;
   onSaveSettings?: (newSettings: AppSettings) => void;
@@ -32,6 +33,7 @@ export const ExtractionSettings: React.FC<ExtractionSettingsProps> = ({
   onStartFullScan,
   scanProgress,
   onCancelScan,
+  onDismissScanProgress,
   subtitleCount,
   appSettings,
   onSaveSettings,
@@ -172,6 +174,36 @@ export const ExtractionSettings: React.FC<ExtractionSettingsProps> = ({
           )}
         </div>
       </div>
+
+      {/* Persistent Error Alert if OCR Extraction Failed or Skipped */}
+      {scanProgress.status === 'error' && (
+        <div className="bg-rose-950/60 border-2 border-rose-500/60 rounded-xl p-4 flex flex-col gap-3 animate-in fade-in zoom-in-95">
+          <div className="flex items-start gap-2.5">
+            <div className="p-1.5 bg-rose-500/20 text-rose-400 rounded-lg shrink-0 mt-0.5">
+              <AlertTriangle className="w-5 h-5 animate-pulse" />
+            </div>
+            <div className="space-y-1">
+              <h4 className="text-xs font-bold text-rose-300 uppercase tracking-wide">
+                Lỗi Quét Mặt Chữ / OCR Bị Bỏ Qua
+              </h4>
+              <p className="text-xs text-slate-200 leading-relaxed font-medium">
+                {scanProgress.message}
+              </p>
+              <p className="text-[10px] text-slate-400 font-mono pt-1">
+                👉 Nhấn F12 (Console) để xem chi tiết log lỗi bóc tách và stack trace.
+              </p>
+            </div>
+          </div>
+          {onDismissScanProgress && (
+            <button
+              onClick={onDismissScanProgress}
+              className="w-full bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold py-2 rounded-lg transition shadow-md flex items-center justify-center"
+            >
+              <span>Đóng thông báo lỗi</span>
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Progress View if Scanning */}
       {isScanning ? (
